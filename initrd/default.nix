@@ -207,9 +207,7 @@ EOF
         rm -rf "$FLAKE_DIR"
         git clone --depth 1 https://github.com/JoshuaCHolmes/nixos-starter-config "$FLAKE_DIR" || \
           fail "Could not clone starter config"
-        
-        # Copy hardware-configuration.nix into the cloned config
-        cp /mnt/etc/nixos-generated/hardware-configuration.nix "$FLAKE_DIR/" 2>/dev/null || true
+        # Hardware config will be handled in the integration section below
         ;;
         
       minimal)
@@ -285,9 +283,6 @@ CONF
         log "Cloning configuration from $FLAKE_URL..."
         rm -rf "$FLAKE_DIR"
         git clone --depth 1 "$FLAKE_URL" "$FLAKE_DIR" || fail "Could not clone $FLAKE_URL"
-        
-        # Preserve hardware config
-        cp /mnt/etc/nixos-generated/hardware-configuration.nix "$FLAKE_DIR/" 2>/dev/null || true
         ;;
         
       local)
@@ -298,6 +293,67 @@ CONF
         fail "Unknown flake type: $FLAKE_TYPE"
         ;;
     esac
+    
+    # ============================================================
+    # Hardware configuration integration
+    # ============================================================
+    
+    # For non-minimal configs, we need to ensure hardware-configuration.nix is imported
+    if [[ "$FLAKE_TYPE" != "minimal" && -f "$FLAKE_DIR/flake.nix" ]]; then
+      log "Checking hardware configuration integration..."
+      
+      HWCONF_SRC="/mnt/etc/nixos-generated/hardware-configuration.nix"
+      
+      # Try to find where the config expects hardware-configuration.nix
+      # Common patterns:
+      #   1. ./hardware-configuration.nix (root level)
+      #   2. ./hosts/<hostname>/hardware-configuration.nix
+      #   3. Not imported at all (WSL configs, etc.)
+      
+      # Check if flake.nix or any .nix file imports hardware-configuration.nix
+      if grep -rq "hardware-configuration" "$FLAKE_DIR"/*.nix "$FLAKE_DIR"/**/*.nix 2>/dev/null; then
+        log "Config imports hardware-configuration.nix"
+        
+        # Find where it's expected
+        IMPORT_PATH=$(grep -rh "hardware-configuration" "$FLAKE_DIR" 2>/dev/null | head -1)
+        
+        # Check common locations
+        if [[ -d "$FLAKE_DIR/hosts/$FLAKE_HOSTNAME" ]]; then
+          # Host-specific directory exists, put it there
+          HWCONF_DEST="$FLAKE_DIR/hosts/$FLAKE_HOSTNAME/hardware-configuration.nix"
+          log "Placing hardware config in hosts/$FLAKE_HOSTNAME/"
+        elif [[ -d "$FLAKE_DIR/hosts" ]]; then
+          # Has hosts dir but not this hostname - create it
+          mkdir -p "$FLAKE_DIR/hosts/$FLAKE_HOSTNAME"
+          HWCONF_DEST="$FLAKE_DIR/hosts/$FLAKE_HOSTNAME/hardware-configuration.nix"
+          log "Creating hosts/$FLAKE_HOSTNAME/ for hardware config"
+        else
+          # Put at root level
+          HWCONF_DEST="$FLAKE_DIR/hardware-configuration.nix"
+          log "Placing hardware config at root level"
+        fi
+        
+        cp "$HWCONF_SRC" "$HWCONF_DEST"
+        
+      else
+        log "Config does not import hardware-configuration.nix"
+        log "This may be intentional (e.g., WSL configs)"
+        
+        # Check if this looks like a WSL config
+        if grep -rq "wsl.enable\|nixos-wsl" "$FLAKE_DIR" 2>/dev/null; then
+          log "Detected WSL configuration - hardware config not needed"
+        else
+          # Non-WSL config without hardware import - warn but continue
+          log "WARNING: Config doesn't import hardware-configuration.nix"
+          log "         This may cause boot issues on real hardware"
+          log "         Consider adding: ./hardware-configuration.nix to your modules"
+          
+          # Still copy it in case they want to add it manually
+          cp "$HWCONF_SRC" "$FLAKE_DIR/hardware-configuration.nix"
+          log "Hardware config copied to $FLAKE_DIR/ for reference"
+        fi
+      fi
+    fi
     
     # ============================================================
     # Run nixos-install
