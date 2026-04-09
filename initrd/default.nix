@@ -170,21 +170,29 @@ let
     
     log "Generating hardware configuration..."
     mkdir -p /mnt/etc/nixos
-    nixos-generate-config --root /mnt
+    
+    # Generate to a backup location first, so cloned configs can use it
+    mkdir -p /mnt/etc/nixos-generated
+    nixos-generate-config --root /mnt --dir /mnt/etc/nixos-generated
+    
+    # Copy to main location (will be overwritten by cloned configs if needed)
+    cp /mnt/etc/nixos-generated/*.nix /mnt/etc/nixos/
     
     # For loopback installs, we need to add special boot config
     if [[ "$INSTALL_TYPE" == "loopback" || "$INSTALL_TYPE" == "quick" ]]; then
       log "Adding loopback-specific boot configuration..."
       
-      cat >> /mnt/etc/nixos/hardware-configuration.nix << 'EOF'
+      # Append to both locations (generated backup and main)
+      for hwconf in /mnt/etc/nixos-generated/hardware-configuration.nix /mnt/etc/nixos/hardware-configuration.nix; do
+        if [[ -f "$hwconf" ]]; then
+          cat >> "$hwconf" << 'EOF'
 
   # Loopback installation - boot from disk image on NTFS
   boot.initrd.supportedFilesystems = [ "ntfs3" ];
   boot.initrd.availableKernelModules = [ "loop" "ntfs3" ];
-  
-  # Mount Windows partition and loop device in initrd
-  # This is handled by a custom initrd script
 EOF
+        fi
+      done
     fi
     
     # ============================================================

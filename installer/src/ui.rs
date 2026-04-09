@@ -48,6 +48,7 @@ struct InstallConfig {
     install_type: InstallType,
     config_source: ConfigSource,
     custom_flake_url: String,
+    custom_flake_hostname: String,  // Which nixosConfigurations.<name> to build
     hostname: String,
     username: String,
     password: String,
@@ -261,10 +262,16 @@ impl InstallerApp {
             ui.radio_value(&mut self.config.config_source, ConfigSource::CustomUrl, "");
             ui.label("Custom Flake URL - Bring your own configuration");
             if self.config.config_source == ConfigSource::CustomUrl {
+                ui.add_space(5.0);
                 ui.horizontal(|ui| {
-                    ui.label("URL:");
+                    ui.label("Git URL:");
                     ui.text_edit_singleline(&mut self.config.custom_flake_url);
                 });
+                ui.horizontal(|ui| {
+                    ui.label("Config name:");
+                    ui.text_edit_singleline(&mut self.config.custom_flake_hostname);
+                });
+                ui.small("The nixosConfigurations.<name> to build (e.g., 'jch-wsl', 'laptop')");
             }
         });
         
