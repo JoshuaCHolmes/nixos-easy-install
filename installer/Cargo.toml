@@ -39,6 +39,10 @@ xz2 = "0.1"             # .xz decompression
 zstd = "0.13"           # .zst decompression  
 flate2 = "1"            # .gz decompression
 
+# Cryptography for password hashing
+sha2 = "0.10"
+rand = "0.8"
+
 # Unix-specific (for non-Windows builds)
 [target.'cfg(not(windows))'.dependencies]
 libc = "0.2"
