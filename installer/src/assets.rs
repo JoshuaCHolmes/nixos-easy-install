@@ -515,13 +515,10 @@ pub fn generate_grub_config(nixos_root: &str, install_type: &str) -> String {
         "".to_string()
     };
 
-    // ARM64 EFI requires linuxefi/initrdefi commands, x86_64 uses linux/initrd
-    let arch = detect_arch();
-    let (linux_cmd, initrd_cmd) = if arch == "aarch64" {
-        ("linuxefi", "initrdefi")
-    } else {
-        ("linux", "initrd")
-    };
+    // GRUB commands: linuxefi/initrdefi are x86_64-only (for certain Secure Boot setups)
+    // ARM64 GRUB doesn't have these commands - must use linux/initrd
+    // Ubuntu's signed GRUB works with linux/initrd on both architectures
+    let (linux_cmd, initrd_cmd) = ("linux", "initrd");
 
     format!(r#"# NixOS Easy Install - GRUB Configuration
 # Auto-generated - do not edit manually
