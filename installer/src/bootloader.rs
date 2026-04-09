@@ -34,7 +34,7 @@ pub struct BootFiles {
 }
 
 /// Result of bootloader setup
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BootloaderSetupResult {
     /// Path to our boot folder on ESP
     pub esp_folder: PathBuf,

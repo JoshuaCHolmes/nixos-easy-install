@@ -9,6 +9,7 @@ mod system;
 mod loopback;
 mod bootloader;
 mod assets;
+mod switching;
 
 use anyhow::Result;
 use tracing::info;

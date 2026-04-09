@@ -284,13 +284,17 @@ async fn install_inner(
     
     let bootloader_result = setup_bootloader(esp, &boot_files)?;
     state.esp_folder = Some(bootloader_result.esp_folder.clone());
-    state.bootloader_result = Some(bootloader_result);
+    state.bootloader_result = Some(bootloader_result.clone());
     
-    // Step 5: Write install configuration
+    // Step 5: Install OS switching utilities
+    progress(0.60, "Installing switching utilities...");
+    install_switching_utils(config, &bootloader_result)?;
+    
+    // Step 6: Write install configuration
     progress(0.70, "Writing installation configuration...");
     write_install_config(config, esp)?;
     
-    // Step 6: Final verification
+    // Step 7: Final verification
     progress(0.90, "Verifying installation...");
     verify_setup(state)?;
     
@@ -402,6 +406,37 @@ fn setup_bootloader(esp: &EspInfo, boot_files: &BootFiles) -> Result<BootloaderS
     }
     
     crate::bootloader::setup_bootloader(esp, boot_files, "NixOS")
+}
+
+/// Install OS switching utilities for easy boot switching
+fn install_switching_utils(
+    config: &InstallConfig, 
+    bootloader_result: &crate::bootloader::BootloaderSetupResult
+) -> Result<()> {
+    // Install Windows-side utilities to the NixOS folder
+    let utils_dir = match config.install_type.as_str() {
+        "loopback" | "quick" => {
+            let loopback = config.loopback.as_ref()
+                .context("Loopback config missing")?;
+            PathBuf::from(&loopback.target_dir).join("SwitchOS")
+        }
+        _ => {
+            // For partition install, put in a standard location
+            PathBuf::from("C:\\NixOS\\SwitchOS")
+        }
+    };
+    
+    crate::switching::install_windows_switching_utils(
+        &utils_dir,
+        &bootloader_result.boot_entry_id,
+    )?;
+    
+    info!("Installed switching utilities to {:?}", utils_dir);
+    info!("  - boot-to-nixos.bat: Double-click to reboot into NixOS");
+    info!("  - boot-to-nixos.ps1: PowerShell version (more robust)");
+    info!("  - create-shortcut.ps1: Creates desktop shortcut");
+    
+    Ok(())
 }
 
 fn write_install_config(config: &InstallConfig, esp: &EspInfo) -> Result<()> {

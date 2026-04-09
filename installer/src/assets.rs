@@ -10,16 +10,16 @@ use std::fs::{self, File};
 use std::io::{Read, Write, Cursor};
 use tracing::{info, debug, warn};
 
-/// URLs for Ubuntu's signed boot packages (Noble 24.04 LTS)
+/// URLs for Ubuntu's signed boot packages (Noble 24.04 LTS / Plucky)
 /// Using HTTPS for security
-const SHIM_SIGNED_URL: &str = "https://archive.ubuntu.com/ubuntu/pool/main/s/shim-signed/shim-signed_1.58+15.8-0ubuntu1_amd64.deb";
-const GRUB_SIGNED_URL: &str = "https://archive.ubuntu.com/ubuntu/pool/main/g/grub2-signed/grub-efi-amd64-signed_1.201+2.12-1ubuntu7_amd64.deb";
+const SHIM_SIGNED_URL: &str = "https://archive.ubuntu.com/ubuntu/pool/main/s/shim-signed/shim-signed_1.59+15.8-0ubuntu2_amd64.deb";
+const GRUB_SIGNED_URL: &str = "https://archive.ubuntu.com/ubuntu/pool/main/g/grub2-signed/grub-efi-amd64-signed_1.215+2.14-2ubuntu1_amd64.deb";
 
 /// SHA256 checksums for integrity verification
 /// These are the checksums of the .deb packages from Ubuntu's official repos
-/// Update these when updating package versions
-const SHIM_SIGNED_SHA256: &str = "a1b2c3d4e5f6"; // TODO: Get actual checksum from Ubuntu
-const GRUB_SIGNED_SHA256: &str = "f6e5d4c3b2a1"; // TODO: Get actual checksum from Ubuntu
+/// Verified on 2026-04-09 from archive.ubuntu.com
+const SHIM_SIGNED_SHA256: &str = "f8ed71ce2d91a304b6d5eb84997f846f331b554578bc02dbfe78e13ad8ac81a9";
+const GRUB_SIGNED_SHA256: &str = "603fe7db065634780d9576bab48fce8143a0451697c5be75a6cdb1f6a5e39188";
 
 /// Fallback mirror if primary is slow/unavailable
 const MIRROR_URL: &str = "https://us.archive.ubuntu.com/ubuntu/pool/main";
