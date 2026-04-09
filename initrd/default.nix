@@ -10,11 +10,12 @@ let
     
     export PATH="${pkgs.lib.makeBinPath (with pkgs; [
       coreutils util-linux e2fsprogs dosfstools parted
-      nix git curl jq ntfs3g kmod gawk
+      nix git curl jq ntfs3g kmod gawk pciutils dmidecode
     ])}:$PATH"
 
     CONFIG_PATH="/boot/efi/EFI/NixOS/install-config.json"
     LOG="/tmp/install.log"
+    HARDWARE_REPORT="/tmp/hardware-detection.json"
     
     log() {
       echo "[$(date '+%H:%M:%S')] $*" | tee -a "$LOG"
@@ -241,6 +242,164 @@ EOF
     fi
     
     # ============================================================
+    # Hardware Detection and Auto-Configuration
+    # ============================================================
+    
+    log "Detecting hardware for automatic configuration..."
+    
+    # Read DMI information
+    SYS_VENDOR=$(cat /sys/devices/virtual/dmi/id/sys_vendor 2>/dev/null || echo "Unknown")
+    PRODUCT_NAME=$(cat /sys/devices/virtual/dmi/id/product_name 2>/dev/null || echo "Unknown")
+    PRODUCT_FAMILY=$(cat /sys/devices/virtual/dmi/id/product_family 2>/dev/null || echo "")
+    CHASSIS_TYPE=$(cat /sys/devices/virtual/dmi/id/chassis_type 2>/dev/null || echo "")
+    
+    # Detect architecture
+    ARCH=$(uname -m)
+    IS_ARM=false
+    if [[ "$ARCH" == "aarch64" ]]; then
+      IS_ARM=true
+    fi
+    
+    # Detect if laptop (chassis types 8, 9, 10, 11, 14 are laptops/portables)
+    IS_LAPTOP=false
+    case "$CHASSIS_TYPE" in
+      8|9|10|11|14) IS_LAPTOP=true ;;
+    esac
+    
+    # Detect GPU
+    HAS_NVIDIA=false
+    HAS_AMD_GPU=false
+    HAS_INTEL_GPU=false
+    NVIDIA_BUS_ID=""
+    INTEL_BUS_ID=""
+    AMD_BUS_ID=""
+    
+    while IFS= read -r line; do
+      if echo "$line" | grep -qi "nvidia"; then
+        HAS_NVIDIA=true
+        # Extract bus ID (e.g., "01:00.0" from "01:00.0 VGA compatible controller...")
+        NVIDIA_BUS_ID=$(echo "$line" | grep -oP '^\S+' | sed 's/\.0$//')
+      elif echo "$line" | grep -qi "AMD.*Radeon\|AMD/ATI"; then
+        HAS_AMD_GPU=true
+        AMD_BUS_ID=$(echo "$line" | grep -oP '^\S+' | sed 's/\.0$//')
+      elif echo "$line" | grep -qi "Intel.*Graphics\|Intel.*UHD\|Intel.*Iris"; then
+        HAS_INTEL_GPU=true
+        INTEL_BUS_ID=$(echo "$line" | grep -oP '^\S+' | sed 's/\.0$//')
+      fi
+    done < <(lspci 2>/dev/null | grep -i "vga\|3d\|display")
+    
+    # Detect Snapdragon / Qualcomm (ARM)
+    IS_SNAPDRAGON=false
+    SNAPDRAGON_MODEL=""
+    if [[ "$IS_ARM" == "true" ]]; then
+      if lspci 2>/dev/null | grep -qi "Qualcomm"; then
+        IS_SNAPDRAGON=true
+      fi
+      # Check CPU info for Snapdragon
+      if grep -qi "Qualcomm\|Oryon\|X1E\|X Elite" /proc/cpuinfo 2>/dev/null; then
+        IS_SNAPDRAGON=true
+        if grep -qi "X1E-78" /proc/cpuinfo 2>/dev/null; then
+          SNAPDRAGON_MODEL="x1e78"
+        elif grep -qi "X1E-80" /proc/cpuinfo 2>/dev/null; then
+          SNAPDRAGON_MODEL="x1e80"
+        fi
+      fi
+    fi
+    
+    # Detect specific laptop models for nixos-hardware
+    NIXOS_HARDWARE_MODULE=""
+    
+    # ThinkPad detection
+    if echo "$PRODUCT_NAME" | grep -qi "ThinkPad"; then
+      MODEL=$(echo "$PRODUCT_NAME" | grep -oP 'ThinkPad\s+\S+' | tr '[:upper:]' '[:lower:]' | tr ' ' '/')
+      case "$PRODUCT_NAME" in
+        *"T14s Gen 6"*|*"T14s G6"*)
+          if [[ "$IS_SNAPDRAGON" == "true" ]]; then
+            NIXOS_HARDWARE_MODULE="lenovo-thinkpad-t14s-aarch64"
+            log "Detected: ThinkPad T14s Gen 6 (Snapdragon)"
+          fi
+          ;;
+        *"T480"*) NIXOS_HARDWARE_MODULE="lenovo/thinkpad/t480" ;;
+        *"T490"*) NIXOS_HARDWARE_MODULE="lenovo/thinkpad/t490" ;;
+        *"T14"*) NIXOS_HARDWARE_MODULE="lenovo/thinkpad/t14" ;;
+        *"X1 Carbon"*|*"X1C"*)
+          if echo "$PRODUCT_NAME" | grep -qi "Gen 9\|9th"; then
+            NIXOS_HARDWARE_MODULE="lenovo/thinkpad/x1-carbon/9th-gen"
+          elif echo "$PRODUCT_NAME" | grep -qi "Gen 10\|10th"; then
+            NIXOS_HARDWARE_MODULE="lenovo/thinkpad/x1-carbon/10th-gen"
+          fi
+          ;;
+        *"X220"*) NIXOS_HARDWARE_MODULE="lenovo/thinkpad/x220" ;;
+        *"X230"*) NIXOS_HARDWARE_MODULE="lenovo/thinkpad/x230" ;;
+      esac
+    
+    # Framework detection
+    elif echo "$SYS_VENDOR" | grep -qi "Framework"; then
+      if echo "$PRODUCT_NAME" | grep -qi "13"; then
+        NIXOS_HARDWARE_MODULE="framework/13-inch/common"
+      elif echo "$PRODUCT_NAME" | grep -qi "16"; then
+        NIXOS_HARDWARE_MODULE="framework/16-inch"
+      fi
+      log "Detected: Framework laptop"
+    
+    # Dell XPS detection
+    elif echo "$PRODUCT_NAME" | grep -qi "XPS"; then
+      case "$PRODUCT_NAME" in
+        *"13 9310"*) NIXOS_HARDWARE_MODULE="dell/xps/13-9310" ;;
+        *"13 9380"*) NIXOS_HARDWARE_MODULE="dell/xps/13-9380" ;;
+        *"15 9500"*) NIXOS_HARDWARE_MODULE="dell/xps/15-9500" ;;
+        *"15 9510"*) NIXOS_HARDWARE_MODULE="dell/xps/15-9510" ;;
+      esac
+      log "Detected: Dell XPS"
+    
+    # Yoga Slim 7x (Snapdragon)
+    elif echo "$PRODUCT_NAME" | grep -qi "Yoga Slim 7x\|83ED"; then
+      if [[ "$IS_SNAPDRAGON" == "true" ]]; then
+        NIXOS_HARDWARE_MODULE="lenovo-yoga-slim7x-snapdragon"
+        log "Detected: Lenovo Yoga Slim 7x (Snapdragon)"
+      fi
+    
+    # Surface devices
+    elif echo "$SYS_VENDOR" | grep -qi "Microsoft"; then
+      if echo "$PRODUCT_NAME" | grep -qi "Surface"; then
+        log "Detected: Microsoft Surface - may need linux-surface kernel"
+      fi
+    fi
+    
+    # Log detection results
+    log "Hardware Detection Results:"
+    log "  Vendor: $SYS_VENDOR"
+    log "  Product: $PRODUCT_NAME"
+    log "  Architecture: $ARCH"
+    log "  Is Laptop: $IS_LAPTOP"
+    log "  Is ARM/Snapdragon: $IS_ARM / $IS_SNAPDRAGON"
+    log "  NVIDIA GPU: $HAS_NVIDIA''${NVIDIA_BUS_ID:+ (bus $NVIDIA_BUS_ID)}"
+    log "  AMD GPU: $HAS_AMD_GPU''${AMD_BUS_ID:+ (bus $AMD_BUS_ID)}"
+    log "  Intel GPU: $HAS_INTEL_GPU''${INTEL_BUS_ID:+ (bus $INTEL_BUS_ID)}"
+    log "  nixos-hardware module: ''${NIXOS_HARDWARE_MODULE:-none detected}"
+    
+    # Generate hardware detection report for config generation
+    cat > "$HARDWARE_REPORT" << EOF
+{
+  "vendor": "$SYS_VENDOR",
+  "product": "$PRODUCT_NAME",
+  "product_family": "$PRODUCT_FAMILY",
+  "arch": "$ARCH",
+  "is_laptop": $IS_LAPTOP,
+  "is_arm": $IS_ARM,
+  "is_snapdragon": $IS_SNAPDRAGON,
+  "snapdragon_model": "$SNAPDRAGON_MODEL",
+  "has_nvidia": $HAS_NVIDIA,
+  "nvidia_bus_id": "$NVIDIA_BUS_ID",
+  "has_amd_gpu": $HAS_AMD_GPU,
+  "amd_bus_id": "$AMD_BUS_ID",
+  "has_intel_gpu": $HAS_INTEL_GPU,
+  "intel_bus_id": "$INTEL_BUS_ID",
+  "nixos_hardware_module": "$NIXOS_HARDWARE_MODULE"
+}
+EOF
+    
+    # ============================================================
     # Fetch/setup flake configuration
     # ============================================================
     
@@ -270,6 +429,60 @@ EOF
           log "Renamed hosts/default to hosts/$HOSTNAME"
         fi
         
+        # Build flake inputs based on detected hardware
+        NIXOS_HARDWARE_INPUT=""
+        NIXOS_HARDWARE_MODULE_IMPORT=""
+        SNAPDRAGON_INPUT=""
+        SNAPDRAGON_MODULE_IMPORT=""
+        
+        if [[ -n "$NIXOS_HARDWARE_MODULE" ]]; then
+          # Special handling for Snapdragon laptops
+          if [[ "$NIXOS_HARDWARE_MODULE" == "lenovo-yoga-slim7x-snapdragon" ]]; then
+            SNAPDRAGON_INPUT='
+    # Snapdragon X Elite support
+    x1e-nixos = {
+      url = "github:kuruczgy/x1e-nixos-config";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };'
+            SNAPDRAGON_MODULE_IMPORT='x1e-nixos.nixosModules.yoga-slim7x'
+            log "Adding Snapdragon X Elite (Yoga Slim 7x) support"
+          elif [[ "$NIXOS_HARDWARE_MODULE" == "lenovo-thinkpad-t14s-aarch64" ]]; then
+            SNAPDRAGON_INPUT='
+    # Snapdragon X Elite support
+    x1e-nixos = {
+      url = "github:kuruczgy/x1e-nixos-config";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };'
+            SNAPDRAGON_MODULE_IMPORT='x1e-nixos.nixosModules.thinkpad-t14s'
+            log "Adding Snapdragon X Elite (ThinkPad T14s) support"
+          else
+            # Standard nixos-hardware module
+            NIXOS_HARDWARE_INPUT='
+    nixos-hardware.url = "github:NixOS/nixos-hardware";'
+            NIXOS_HARDWARE_MODULE_IMPORT="nixos-hardware.nixosModules.$NIXOS_HARDWARE_MODULE"
+            log "Adding nixos-hardware module: $NIXOS_HARDWARE_MODULE"
+          fi
+        fi
+        
+        # Add laptop module config if detected as laptop
+        LAPTOP_CONFIG=""
+        if [[ "$IS_LAPTOP" == "true" ]]; then
+          LAPTOP_CONFIG='
+          # Laptop optimizations
+          jch.laptop.enable = true;'
+          
+          # Add NVIDIA config if hybrid graphics detected
+          if [[ "$HAS_NVIDIA" == "true" && ( "$HAS_INTEL_GPU" == "true" || "$HAS_AMD_GPU" == "true" ) ]]; then
+            IGPU_BUS="$INTEL_BUS_ID"
+            [[ -z "$IGPU_BUS" ]] && IGPU_BUS="$AMD_BUS_ID"
+            LAPTOP_CONFIG="$LAPTOP_CONFIG"'
+          jch.laptop.nvidia = true;
+          hardware.nvidia.prime.intelBusId = "PCI:'"$IGPU_BUS"'";
+          hardware.nvidia.prime.nvidiaBusId = "PCI:'"$NVIDIA_BUS_ID"'";'
+            log "Configured NVIDIA Optimus: Intel/AMD=$IGPU_BUS, NVIDIA=$NVIDIA_BUS_ID"
+          fi
+        fi
+        
         # Rewrite flake.nix to use hostname-based configuration
         cat > "$FLAKE_DIR/flake.nix" << FLAKE
 {
@@ -281,10 +494,10 @@ EOF
     home-manager = {
       url = "github:nix-community/home-manager";
       inputs.nixpkgs.follows = "nixpkgs";
-    };
+    };$NIXOS_HARDWARE_INPUT$SNAPDRAGON_INPUT
   };
 
-  outputs = { self, nixpkgs, home-manager, ... }: 
+  outputs = { self, nixpkgs, home-manager, ... }@inputs: 
   let
     mkHost = { 
       system, 
@@ -293,14 +506,14 @@ EOF
       extraModules ? [],
     }: nixpkgs.lib.nixosSystem {
       inherit system;
-      specialArgs = { inherit self username; };
+      specialArgs = { inherit self username inputs; };
       modules = [
         home-manager.nixosModules.home-manager
         ./modules/common.nix
         {
           networking.hostName = hostname;
           home-manager.users.\''${username} = import ./home;
-          home-manager.extraSpecialArgs = { inherit username; };
+          home-manager.extraSpecialArgs = { inherit username; };$LAPTOP_CONFIG
         }
       ] ++ extraModules;
     };
@@ -308,12 +521,15 @@ EOF
   {
     nixosConfigurations = {
       # $HOSTNAME - installed $(date +%Y-%m-%d)
+      # Hardware: $SYS_VENDOR $PRODUCT_NAME
       "$HOSTNAME" = mkHost {
         system = "$SYSTEM";
         hostname = "$HOSTNAME";
         username = "$USERNAME";
         extraModules = [
-          ./hosts/$HOSTNAME
+          ./hosts/$HOSTNAME''${NIXOS_HARDWARE_MODULE_IMPORT:+
+          inputs.$NIXOS_HARDWARE_MODULE_IMPORT}''${SNAPDRAGON_MODULE_IMPORT:+
+          inputs.$SNAPDRAGON_MODULE_IMPORT}
         ];
       };
 
