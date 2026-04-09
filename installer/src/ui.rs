@@ -1,6 +1,7 @@
 //! UI module - the graphical installer interface
 
 use eframe::egui;
+use crate::system::{self, SystemInfo, ValidationResult};
 
 /// The main installer application state
 pub struct InstallerApp {
@@ -10,6 +11,12 @@ pub struct InstallerApp {
     /// User's configuration choices
     config: InstallConfig,
     
+    /// Detected system information (populated on startup)
+    system_info: Option<SystemInfo>,
+    
+    /// Validation results
+    validation: Option<ValidationResult>,
+    
     /// Installation progress (0.0 - 1.0)
     progress: f32,
     
@@ -18,6 +25,9 @@ pub struct InstallerApp {
     
     /// Any error that occurred
     error: Option<String>,
+    
+    /// Whether system detection is in progress
+    detecting: bool,
 }
 
 #[derive(Default, PartialEq)]
@@ -64,6 +74,15 @@ enum ConfigSource {
 
 impl InstallerApp {
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+        // Start system detection immediately
+        let (system_info, validation, error) = match system::detect_system() {
+            Ok(info) => {
+                let validation = system::validate_requirements(&info);
+                (Some(info), Some(validation), None)
+            }
+            Err(e) => (None, None, Some(format!("System detection failed: {}", e))),
+        };
+        
         Self {
             step: InstallStep::Welcome,
             config: InstallConfig {
@@ -71,15 +90,18 @@ impl InstallerApp {
                 hostname: "nixos".to_string(),
                 ..Default::default()
             },
+            system_info,
+            validation,
             progress: 0.0,
             status: String::new(),
-            error: None,
+            error,
+            detecting: false,
         }
     }
     
     fn render_welcome(&mut self, ui: &mut egui::Ui) {
         ui.vertical_centered(|ui| {
-            ui.add_space(40.0);
+            ui.add_space(20.0);
             
             ui.heading("Welcome to NixOS");
             
@@ -87,15 +109,89 @@ impl InstallerApp {
             
             ui.label("This installer will set up NixOS alongside your existing Windows installation.");
             
-            ui.add_space(10.0);
+            ui.add_space(20.0);
             
-            ui.label("NixOS is a Linux distribution with a unique approach to package and configuration management.");
-            ui.label("Your entire system is defined declaratively, making it reproducible and easy to maintain.");
+            // Show system detection results
+            if let Some(ref info) = self.system_info {
+                ui.group(|ui| {
+                    ui.heading("System Detected");
+                    ui.add_space(10.0);
+                    
+                    egui::Grid::new("system_info")
+                        .num_columns(2)
+                        .spacing([20.0, 5.0])
+                        .show(ui, |ui| {
+                            ui.label("Windows:");
+                            ui.label(&info.windows_version);
+                            ui.end_row();
+                            
+                            ui.label("Boot Mode:");
+                            ui.label(if info.is_uefi { "UEFI ✓" } else { "Legacy BIOS" });
+                            ui.end_row();
+                            
+                            ui.label("Secure Boot:");
+                            ui.label(if info.secure_boot_enabled { "Enabled" } else { "Disabled" });
+                            ui.end_row();
+                            
+                            ui.label("Memory:");
+                            ui.label(system::format_bytes(info.total_memory));
+                            ui.end_row();
+                            
+                            if let Some(ref esp) = info.esp {
+                                ui.label("EFI Partition:");
+                                ui.label(format!("{} free", system::format_bytes(esp.free_space)));
+                                ui.end_row();
+                            }
+                        });
+                });
+                
+                ui.add_space(10.0);
+                
+                // Show validation results
+                if let Some(ref validation) = self.validation {
+                    if !validation.errors.is_empty() {
+                        ui.group(|ui| {
+                            ui.colored_label(egui::Color32::RED, "❌ Requirements not met:");
+                            for err in &validation.errors {
+                                ui.label(format!("  • {}", err));
+                            }
+                        });
+                    }
+                    
+                    if !validation.warnings.is_empty() {
+                        ui.group(|ui| {
+                            ui.colored_label(egui::Color32::YELLOW, "⚠ Warnings:");
+                            for warn in &validation.warnings {
+                                ui.label(format!("  • {}", warn));
+                            }
+                        });
+                    }
+                    
+                    if validation.passed {
+                        ui.colored_label(egui::Color32::GREEN, "✓ System meets requirements");
+                    }
+                }
+            } else if let Some(ref err) = self.error {
+                ui.colored_label(egui::Color32::RED, err);
+            } else {
+                ui.spinner();
+                ui.label("Detecting system...");
+            }
             
-            ui.add_space(40.0);
+            ui.add_space(20.0);
             
-            if ui.button("Get Started →").clicked() {
-                self.step = InstallStep::InstallType;
+            // Only allow proceeding if validation passed
+            let can_proceed = self.validation.as_ref().map(|v| v.passed).unwrap_or(false);
+            
+            ui.add_enabled_ui(can_proceed, |ui| {
+                if ui.button("Get Started →").clicked() {
+                    self.step = InstallStep::InstallType;
+                }
+            });
+            
+            if !can_proceed && self.validation.is_some() {
+                ui.add_space(5.0);
+                ui.small("Please resolve the errors above before continuing.");
             }
         });
     }

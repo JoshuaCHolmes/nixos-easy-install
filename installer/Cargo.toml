@@ -11,15 +11,6 @@ license = "GPL-3.0"
 eframe = "0.31"
 egui = "0.31"
 
-# Windows APIs
-windows = { version = "0.58", features = [
-    "Win32_Foundation",
-    "Win32_System_SystemInformation",
-    "Win32_Storage_FileSystem", 
-    "Win32_Security",
-    "Win32_System_Ioctl",
-]}
-
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 
@@ -37,6 +28,10 @@ thiserror = "1"
 # Logging
 tracing = "0.1"
 tracing-subscriber = "0.3"
+
+# Unix-specific (for non-Windows builds)
+[target.'cfg(not(windows))'.dependencies]
+libc = "0.2"
 
 [build-dependencies]
 embed-resource = "2"  # For Windows exe icon/manifest
