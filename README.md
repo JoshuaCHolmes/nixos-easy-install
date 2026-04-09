@@ -81,18 +81,50 @@ This installer works with [nixos-starter-config](https://github.com/JoshuaCHolme
 
 Requires NixOS or Nix with flakes enabled.
 
+### Quick Build (x86_64 Windows .exe)
+
+From any Linux system (including ARM64 WSL):
+
 ```bash
-# Enter development shell
-nix develop
+cd installer
 
-# Build Windows installer (requires x86_64-linux for cross-compilation)
+# Using nix-shell one-liner (recommended)
+nix-shell -p rustup pkgsCross.mingwW64.buildPackages.gcc --run \
+  "rustup target add x86_64-pc-windows-gnu && \
+   CC=x86_64-w64-mingw32-gcc cargo build --release --target x86_64-pc-windows-gnu"
+
+# Output: target/x86_64-pc-windows-gnu/release/nixos-install.exe
+```
+
+**Note:** If you get linking errors about `libpthread.a`, add pthreads to your `.cargo/config.toml`:
+
+```toml
+[target.x86_64-pc-windows-gnu]
+linker = "x86_64-w64-mingw32-gcc"
+ar = "x86_64-w64-mingw32-ar"
+rustflags = ["-L", "/nix/store/...-mingw_w64-pthreads-.../lib"]
+```
+
+Find the path with: `nix eval --raw nixpkgs#pkgsCross.mingwW64.windows.pthreads`
+
+### Development Shell
+
+```bash
+# Enter development environment
+nix-shell shell.nix
+
+# Native build (for testing logic on Linux)
+cargo build
+
+# Windows build
 cargo build --release --target x86_64-pc-windows-gnu
+```
 
-# Build installer initrd
+### Build Initrd
+
+```bash
+# Build installer initrd (NixOS system that runs after reboot)
 nix build .#initrd
-
-# Build everything
-nix build
 ```
 
 ## Safety Design

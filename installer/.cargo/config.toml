@@ -1,0 +1,4 @@
+[target.x86_64-pc-windows-gnu]
+linker = "x86_64-w64-mingw32-gcc"
+ar = "x86_64-w64-mingw32-ar"
+rustflags = ["-L", "/nix/store/4cspkzxii9lxkqbz7hl4zdnxqinhjjcm-mingw_w64-pthreads-x86_64-w64-mingw32-13.0.0/lib"]

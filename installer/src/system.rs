@@ -6,7 +6,7 @@
 // Some fields are reserved for future use (e.g., full partition install)
 #![allow(dead_code)]
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tracing::{info, debug};
 
 // ============================================================================
@@ -154,12 +154,12 @@ fn detect_uefi_mode() -> Result<bool> {
     
     // GetFirmwareEnvironmentVariable returns ERROR_INVALID_FUNCTION on BIOS
     // We can also check via bcdedit or registry
-    let output = Command::new("powershell")
+    let _output = Command::new("powershell")
         .args(["-Command", "[Environment]::Is64BitOperatingSystem -and (Test-Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\SecureBoot')"])
         .output()
         .context("Failed to detect UEFI mode")?;
     
-    // Alternative: check if EFI system partition exists
+    // Check if EFI system partition exists
     let efi_check = Command::new("powershell")
         .args(["-Command", "(Get-Partition | Where-Object { $_.GptType -eq '{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}' }) -ne $null"])
         .output()
