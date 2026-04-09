@@ -6,6 +6,8 @@ mod ui;
 mod install;
 mod config;
 mod system;
+mod loopback;
+mod bootloader;
 
 use anyhow::Result;
 use tracing::info;

@@ -1,0 +1,13 @@
+# Build artifacts
+/installer/target/
+/initrd/result
+
+# Editor
+*.swp
+*~
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

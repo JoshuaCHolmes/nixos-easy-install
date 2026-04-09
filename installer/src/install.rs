@@ -49,13 +49,20 @@ pub async fn install(config: InstallConfig, progress: ProgressCallback) -> Resul
 }
 
 fn validate_system() -> Result<()> {
-    let info = crate::system::get_system_info()?;
+    let info = crate::system::detect_system()?;
     
     if !info.is_uefi {
         warn!("System is not UEFI - legacy BIOS support is experimental");
     }
     
-    if info.available_disk_gb < 20 {
+    // Check disk space from system info - use total available from largest disk
+    let max_disk_space = info.disks.iter()
+        .flat_map(|d| d.partitions.iter())
+        .filter_map(|p| p.free_space)
+        .max()
+        .unwrap_or(0);
+    
+    if max_disk_space < 20 * 1024 * 1024 * 1024 {
         anyhow::bail!("Insufficient disk space. At least 20GB required.");
     }
     

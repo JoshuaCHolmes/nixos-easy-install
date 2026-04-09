@@ -51,6 +51,9 @@ pub struct EspInfo {
     
     /// Partition number on that disk
     pub partition_number: u32,
+    
+    /// Mount point path (e.g., S:\)
+    pub mount_point: std::path::PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -231,13 +234,19 @@ fn detect_esp() -> Result<EspInfo> {
     let parsed: serde_json::Value = serde_json::from_str(json.trim())
         .context("Failed to parse ESP info")?;
     
+    let drive_letter = parsed["DriveLetter"].as_str().map(|s| format!("{}:", s));
+    let mount_point = drive_letter.as_ref()
+        .map(|d| std::path::PathBuf::from(format!("{}\\", d)))
+        .unwrap_or_else(|| std::path::PathBuf::from(""));
+    
     Ok(EspInfo {
         disk_number: parsed["DiskNumber"].as_u64().unwrap_or(0) as u32,
         partition_number: parsed["PartitionNumber"].as_u64().unwrap_or(0) as u32,
         size: parsed["Size"].as_u64().unwrap_or(0),
-        drive_letter: parsed["DriveLetter"].as_str().map(|s| format!("{}:", s)),
+        drive_letter,
         free_space: parsed["FreeSpace"].as_u64().unwrap_or(0),
         partition_guid: parsed["Guid"].as_str().unwrap_or("").to_string(),
+        mount_point,
     })
 }
 
