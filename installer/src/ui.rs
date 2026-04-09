@@ -1,7 +1,20 @@
 //! UI module - the graphical installer interface
 
 use eframe::egui;
+use std::sync::{Arc, Mutex};
+use std::thread;
 use crate::system::{self, SystemInfo, ValidationResult};
+use crate::config::{self as config_mod, InstallConfig as RealInstallConfig};
+use crate::install;
+
+/// Shared state for progress updates from install thread
+#[derive(Default, Clone)]
+struct InstallProgress {
+    progress: f32,
+    status: String,
+    error: Option<String>,
+    complete: bool,
+}
 
 /// The main installer application state
 pub struct InstallerApp {
@@ -9,7 +22,7 @@ pub struct InstallerApp {
     step: InstallStep,
     
     /// User's configuration choices
-    config: InstallConfig,
+    config: UiInstallConfig,
     
     /// Detected system information (populated on startup)
     system_info: Option<SystemInfo>,
@@ -28,6 +41,15 @@ pub struct InstallerApp {
     
     /// Whether system detection is in progress
     detecting: bool,
+    
+    /// Shared progress state for install thread
+    install_progress: Arc<Mutex<InstallProgress>>,
+    
+    /// Whether installation has been started
+    install_started: bool,
+    
+    /// Validation errors for current form
+    form_errors: Vec<String>,
 }
 
 #[derive(Default, PartialEq)]
@@ -44,7 +66,7 @@ enum InstallStep {
 }
 
 #[derive(Default)]
-struct InstallConfig {
+struct UiInstallConfig {
     install_type: InstallType,
     config_source: ConfigSource,
     custom_flake_url: String,
@@ -86,7 +108,7 @@ impl InstallerApp {
         
         Self {
             step: InstallStep::Welcome,
-            config: InstallConfig {
+            config: UiInstallConfig {
                 partition_size_gb: 64,
                 hostname: "nixos".to_string(),
                 ..Default::default()
@@ -97,7 +119,188 @@ impl InstallerApp {
             status: String::new(),
             error,
             detecting: false,
+            install_progress: Arc::new(Mutex::new(InstallProgress::default())),
+            install_started: false,
+            form_errors: Vec::new(),
         }
+    }
+    
+    /// Validate the current form inputs
+    fn validate_form(&mut self) -> bool {
+        self.form_errors.clear();
+        
+        // Validate hostname
+        if let Err(e) = config_mod::validate_hostname(&self.config.hostname) {
+            self.form_errors.push(format!("Hostname: {}", e));
+        }
+        
+        // Validate username
+        if let Err(e) = config_mod::validate_username(&self.config.username) {
+            self.form_errors.push(format!("Username: {}", e));
+        }
+        
+        // Validate password
+        if self.config.password.is_empty() {
+            self.form_errors.push("Password cannot be empty".to_string());
+        } else if let Err(e) = config_mod::validate_password(&self.config.password) {
+            self.form_errors.push(format!("Password: {}", e));
+        }
+        
+        // Password confirmation
+        if self.config.password != self.config.password_confirm {
+            self.form_errors.push("Passwords do not match".to_string());
+        }
+        
+        // Validate custom URL if selected
+        if self.config.config_source == ConfigSource::CustomUrl {
+            if let Err(e) = config_mod::validate_git_url(&self.config.custom_flake_url) {
+                self.form_errors.push(format!("Git URL: {}", e));
+            }
+        }
+        
+        self.form_errors.is_empty()
+    }
+    
+    /// Build the actual InstallConfig from UI state
+    fn build_install_config(&self) -> Result<RealInstallConfig, String> {
+        let flake_type = match self.config.config_source {
+            ConfigSource::Starter => "starter",
+            ConfigSource::Minimal => "minimal",
+            ConfigSource::CustomUrl => "url",
+            ConfigSource::LocalPath => "local",
+        };
+        
+        let flake_url = if self.config.config_source == ConfigSource::CustomUrl {
+            Some(self.config.custom_flake_url.clone())
+        } else {
+            None
+        };
+        
+        let password_hash = config_mod::hash_password(&self.config.password);
+        
+        match self.config.install_type {
+            InstallType::Quick => {
+                RealInstallConfig::new_loopback(
+                    self.config.hostname.clone(),
+                    self.config.username.clone(),
+                    password_hash,
+                    flake_type,
+                    flake_url,
+                    self.config.partition_size_gb,
+                ).map_err(|e| e.to_string())
+            }
+            InstallType::Full => {
+                // Full partition install - not yet supported
+                Err("Full partition installation is not yet supported. Please use Quick Install.".to_string())
+            }
+        }
+    }
+    
+    /// Run a dry-run to test without making changes
+    fn run_dry_run(&mut self) {
+        let config = match self.build_install_config() {
+            Ok(c) => c,
+            Err(e) => {
+                self.form_errors.push(format!("Config error: {}", e));
+                return;
+            }
+        };
+        
+        let system_info = match &self.system_info {
+            Some(info) => info.clone(),
+            None => {
+                self.form_errors.push("System info not available".to_string());
+                return;
+            }
+        };
+        
+        // Run dry-run synchronously (it's quick)
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let progress_callback: install::ProgressCallback = Box::new(|_, _| {});
+        
+        match rt.block_on(install::dry_run(config, &system_info, progress_callback)) {
+            Ok(report) => {
+                self.form_errors.clear();
+                if report.passed {
+                    self.status = "✓ Dry run passed - ready to install!".to_string();
+                } else {
+                    for step in &report.steps {
+                        if !step.passed {
+                            if let Some(ref err) = step.error {
+                                self.form_errors.push(format!("{}: {}", step.name, err));
+                            }
+                        }
+                    }
+                }
+                for warning in report.warnings {
+                    self.form_errors.push(format!("Warning: {}", warning));
+                }
+            }
+            Err(e) => {
+                self.form_errors.push(format!("Dry run failed: {}", e));
+            }
+        }
+    }
+    
+    /// Start the installation in a background thread
+    fn start_installation(&mut self) {
+        if self.install_started {
+            return;
+        }
+        
+        // Build the config
+        let config = match self.build_install_config() {
+            Ok(c) => c,
+            Err(e) => {
+                self.error = Some(e);
+                return;
+            }
+        };
+        
+        let system_info = match &self.system_info {
+            Some(info) => info.clone(),
+            None => {
+                self.error = Some("System info not available".to_string());
+                return;
+            }
+        };
+        
+        let progress_state = self.install_progress.clone();
+        
+        self.install_started = true;
+        
+        // Spawn installation thread
+        thread::spawn(move || {
+            // Create a runtime for async code
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            
+            rt.block_on(async {
+                let progress_callback: install::ProgressCallback = Box::new({
+                    let progress_state = progress_state.clone();
+                    move |progress, status| {
+                        if let Ok(mut state) = progress_state.lock() {
+                            state.progress = progress;
+                            state.status = status.to_string();
+                        }
+                    }
+                });
+                
+                match install::install(config, &system_info, progress_callback).await {
+                    Ok(()) => {
+                        if let Ok(mut state) = progress_state.lock() {
+                            state.complete = true;
+                            state.progress = 1.0;
+                            state.status = "Installation complete!".to_string();
+                        }
+                    }
+                    Err(e) => {
+                        if let Ok(mut state) = progress_state.lock() {
+                            state.error = Some(e.to_string());
+                        }
+                    }
+                }
+            });
+        });
     }
     
     fn render_welcome(&mut self, ui: &mut egui::Ui) {
@@ -347,6 +550,23 @@ impl InstallerApp {
             ui.colored_label(egui::Color32::RED, "Passwords do not match");
         }
         
+        // Disk size for Quick Install
+        if self.config.install_type == InstallType::Quick {
+            ui.add_space(20.0);
+            ui.separator();
+            ui.add_space(10.0);
+            
+            ui.label("How much space for NixOS?");
+            ui.add_space(5.0);
+            
+            ui.horizontal(|ui| {
+                ui.label("Size:");
+                ui.add(egui::Slider::new(&mut self.config.partition_size_gb, 20..=500).suffix(" GB"));
+            });
+            
+            ui.small("This creates a disk image file on your Windows drive. You can resize it later.");
+        }
+        
         ui.add_space(30.0);
         
         let prev_step = if self.config.install_type == InstallType::Full {
@@ -395,6 +615,12 @@ impl InstallerApp {
                 ui.label(&self.config.username);
                 ui.end_row();
                 
+                if self.config.install_type == InstallType::Quick {
+                    ui.strong("Disk Size:");
+                    ui.label(format!("{} GB", self.config.partition_size_gb));
+                    ui.end_row();
+                }
+                
                 if self.config.install_type == InstallType::Full {
                     ui.strong("Partition Size:");
                     ui.label(format!("{} GB", self.config.partition_size_gb));
@@ -406,7 +632,18 @@ impl InstallerApp {
                 }
             });
         
-        ui.add_space(30.0);
+        // Show validation errors if any
+        if !self.form_errors.is_empty() {
+            ui.add_space(20.0);
+            ui.group(|ui| {
+                ui.colored_label(egui::Color32::RED, "❌ Please fix the following errors:");
+                for err in &self.form_errors {
+                    ui.label(format!("  • {}", err));
+                }
+            });
+        }
+        
+        ui.add_space(20.0);
         
         ui.colored_label(
             egui::Color32::YELLOW, 
@@ -420,16 +657,41 @@ impl InstallerApp {
                 self.step = InstallStep::UserSetup;
             }
             
-            ui.add_space(20.0);
+            ui.add_space(10.0);
             
-            if ui.button("Install NixOS").clicked() {
-                self.step = InstallStep::Installing;
-                // TODO: Start installation in background thread
+            // Dry-run button to test without making changes
+            if ui.button("🔍 Test (Dry Run)").clicked() {
+                if self.validate_form() {
+                    self.run_dry_run();
+                }
+            }
+            
+            ui.add_space(10.0);
+            
+            // Validate before allowing install
+            let install_button = ui.button("Install NixOS");
+            if install_button.clicked() {
+                if self.validate_form() {
+                    self.step = InstallStep::Installing;
+                    self.start_installation();
+                }
             }
         });
     }
     
     fn render_installing(&mut self, ui: &mut egui::Ui) {
+        // Update from shared progress state
+        if let Ok(state) = self.install_progress.lock() {
+            self.progress = state.progress;
+            self.status = state.status.clone();
+            if let Some(ref err) = state.error {
+                self.error = Some(err.clone());
+            }
+            if state.complete && self.error.is_none() {
+                self.step = InstallStep::Complete;
+            }
+        }
+        
         ui.vertical_centered(|ui| {
             ui.add_space(40.0);
             
@@ -445,27 +707,59 @@ impl InstallerApp {
             
             if let Some(ref error) = self.error {
                 ui.add_space(20.0);
-                ui.colored_label(egui::Color32::RED, error);
+                ui.colored_label(egui::Color32::RED, format!("Error: {}", error));
+                
+                ui.add_space(20.0);
+                if ui.button("← Go Back").clicked() {
+                    self.step = InstallStep::Summary;
+                    self.install_started = false;
+                    self.error = None;
+                    *self.install_progress.lock().unwrap() = InstallProgress::default();
+                }
             }
         });
+        
+        // Request repaint while installing to update progress
+        ui.ctx().request_repaint();
     }
     
     fn render_complete(&mut self, ui: &mut egui::Ui) {
         ui.vertical_centered(|ui| {
             ui.add_space(40.0);
             
+            ui.colored_label(egui::Color32::GREEN, "✓");
             ui.heading("Installation Complete!");
             
             ui.add_space(20.0);
             
-            ui.label("NixOS has been successfully installed.");
-            ui.label("Your computer will restart to complete the setup.");
+            ui.label("NixOS has been prepared on your system.");
+            ui.label("Click 'Restart Now' to boot into the NixOS installer,");
+            ui.label("which will complete the setup automatically.");
+            
+            ui.add_space(10.0);
+            
+            ui.group(|ui| {
+                ui.label("After restart:");
+                ui.label("  1. Your computer will boot into the NixOS installer");
+                ui.label("  2. Installation will complete automatically (5-15 minutes)");
+                ui.label("  3. System will reboot into your new NixOS");
+            });
             
             ui.add_space(30.0);
             
-            if ui.button("Restart Now").clicked() {
-                // TODO: Trigger reboot
-            }
+            ui.horizontal(|ui| {
+                if ui.button("Restart Later").clicked() {
+                    std::process::exit(0);
+                }
+                
+                ui.add_space(20.0);
+                
+                if ui.button("Restart Now").clicked() {
+                    if let Err(e) = install::reboot() {
+                        self.error = Some(format!("Failed to restart: {}", e));
+                    }
+                }
+            });
         });
     }
     
