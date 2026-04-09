@@ -252,6 +252,7 @@ EOF
     PRODUCT_NAME=$(cat /sys/devices/virtual/dmi/id/product_name 2>/dev/null || echo "Unknown")
     PRODUCT_FAMILY=$(cat /sys/devices/virtual/dmi/id/product_family 2>/dev/null || echo "")
     CHASSIS_TYPE=$(cat /sys/devices/virtual/dmi/id/chassis_type 2>/dev/null || echo "")
+    BOARD_NAME=$(cat /sys/devices/virtual/dmi/id/board_name 2>/dev/null || echo "")
     
     # Detect architecture
     ARCH=$(uname -m)
@@ -260,11 +261,36 @@ EOF
       IS_ARM=true
     fi
     
+    # Detect CPU information
+    CPU_MODEL=$(grep -m1 "model name" /proc/cpuinfo 2>/dev/null | cut -d: -f2 | xargs || echo "Unknown")
+    CPU_VENDOR=""
+    if echo "$CPU_MODEL" | grep -qi "Intel"; then
+      CPU_VENDOR="intel"
+    elif echo "$CPU_MODEL" | grep -qi "AMD"; then
+      CPU_VENDOR="amd"
+    elif echo "$CPU_MODEL" | grep -qi "Qualcomm\|Oryon\|Snapdragon"; then
+      CPU_VENDOR="qualcomm"
+    elif echo "$CPU_MODEL" | grep -qi "Apple"; then
+      CPU_VENDOR="apple"
+    fi
+    
+    # Detect RAM size (for swap/hibernate configuration)
+    RAM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+    RAM_MB=$((RAM_KB / 1024))
+    RAM_GB=$((RAM_MB / 1024))
+    # For hibernate, swap should be >= RAM. Add 2GB buffer for safety.
+    SWAP_SIZE_MB=$((RAM_MB + 2048))
+    log "Detected RAM: ${RAM_GB}GB (${RAM_MB}MB) - Recommended swap: ${SWAP_SIZE_MB}MB"
+    
     # Detect if laptop (chassis types 8, 9, 10, 11, 14 are laptops/portables)
     IS_LAPTOP=false
     case "$CHASSIS_TYPE" in
       8|9|10|11|14) IS_LAPTOP=true ;;
     esac
+    # Also check for battery presence as fallback
+    if [[ -d /sys/class/power_supply/BAT0 || -d /sys/class/power_supply/BAT1 ]]; then
+      IS_LAPTOP=true
+    fi
     
     # Detect GPU
     HAS_NVIDIA=false
@@ -273,12 +299,14 @@ EOF
     NVIDIA_BUS_ID=""
     INTEL_BUS_ID=""
     AMD_BUS_ID=""
+    NVIDIA_MODEL=""
     
     while IFS= read -r line; do
       if echo "$line" | grep -qi "nvidia"; then
         HAS_NVIDIA=true
         # Extract bus ID (e.g., "01:00.0" from "01:00.0 VGA compatible controller...")
         NVIDIA_BUS_ID=$(echo "$line" | grep -oP '^\S+' | sed 's/\.0$//')
+        NVIDIA_MODEL=$(echo "$line" | sed 's/.*: //')
       elif echo "$line" | grep -qi "AMD.*Radeon\|AMD/ATI"; then
         HAS_AMD_GPU=true
         AMD_BUS_ID=$(echo "$line" | grep -oP '^\S+' | sed 's/\.0$//')
@@ -296,20 +324,47 @@ EOF
         IS_SNAPDRAGON=true
       fi
       # Check CPU info for Snapdragon
-      if grep -qi "Qualcomm\|Oryon\|X1E\|X Elite" /proc/cpuinfo 2>/dev/null; then
+      if echo "$CPU_MODEL" | grep -qi "Qualcomm\|Oryon\|X1E\|X Elite"; then
         IS_SNAPDRAGON=true
-        if grep -qi "X1E-78" /proc/cpuinfo 2>/dev/null; then
+        if echo "$CPU_MODEL" | grep -qi "X1E-78"; then
           SNAPDRAGON_MODEL="x1e78"
-        elif grep -qi "X1E-80" /proc/cpuinfo 2>/dev/null; then
+        elif echo "$CPU_MODEL" | grep -qi "X1E-80"; then
           SNAPDRAGON_MODEL="x1e80"
+        elif echo "$CPU_MODEL" | grep -qi "X1E"; then
+          SNAPDRAGON_MODEL="x1e"
         fi
       fi
     fi
     
-    # Detect specific laptop models for nixos-hardware
+    # Detect WiFi chipset for potential firmware needs
+    WIFI_CHIPSET=""
+    WIFI_NEEDS_FIRMWARE=false
+    while IFS= read -r line; do
+      if echo "$line" | grep -qi "Intel.*Wireless\|Intel.*Wi-Fi\|Intel.*AX"; then
+        WIFI_CHIPSET="intel"
+      elif echo "$line" | grep -qi "Qualcomm\|Atheros"; then
+        WIFI_CHIPSET="qualcomm"
+        # Qualcomm WiFi on ARM often needs firmware extraction
+        [[ "$IS_ARM" == "true" ]] && WIFI_NEEDS_FIRMWARE=true
+      elif echo "$line" | grep -qi "Broadcom"; then
+        WIFI_CHIPSET="broadcom"
+      elif echo "$line" | grep -qi "Realtek"; then
+        WIFI_CHIPSET="realtek"
+      elif echo "$line" | grep -qi "MediaTek"; then
+        WIFI_CHIPSET="mediatek"
+      fi
+    done < <(lspci 2>/dev/null | grep -i "network\|wireless\|wifi\|802.11")
+    
+    # ============================================================
+    # Model-specific nixos-hardware detection
+    # ============================================================
+    
     NIXOS_HARDWARE_MODULE=""
     
-    # ThinkPad detection
+    # Use multiple sources to identify the machine
+    MACHINE_ID="$SYS_VENDOR $PRODUCT_NAME $PRODUCT_FAMILY $BOARD_NAME $CPU_MODEL"
+    
+    # ThinkPad detection (comprehensive)
     if echo "$PRODUCT_NAME" | grep -qi "ThinkPad"; then
       MODEL=$(echo "$PRODUCT_NAME" | grep -oP 'ThinkPad\s+\S+' | tr '[:upper:]' '[:lower:]' | tr ' ' '/')
       case "$PRODUCT_NAME" in
@@ -363,6 +418,70 @@ EOF
     elif echo "$SYS_VENDOR" | grep -qi "Microsoft"; then
       if echo "$PRODUCT_NAME" | grep -qi "Surface"; then
         log "Detected: Microsoft Surface - may need linux-surface kernel"
+        # TODO: Could add linux-surface flake input here
+      fi
+    
+    # ASUS detection
+    elif echo "$SYS_VENDOR" | grep -qi "ASUS\|ASUSTeK"; then
+      if echo "$PRODUCT_NAME" | grep -qi "ROG"; then
+        NIXOS_HARDWARE_MODULE="asus/rog-strix"
+        log "Detected: ASUS ROG"
+      elif echo "$PRODUCT_NAME" | grep -qi "Zephyrus"; then
+        NIXOS_HARDWARE_MODULE="asus/zephyrus"
+        log "Detected: ASUS Zephyrus"
+      fi
+    
+    # HP detection  
+    elif echo "$SYS_VENDOR" | grep -qi "HP\|Hewlett"; then
+      if echo "$PRODUCT_NAME" | grep -qi "EliteBook"; then
+        log "Detected: HP EliteBook"
+        # HP EliteBooks generally work well, no special module needed
+      elif echo "$PRODUCT_NAME" | grep -qi "Spectre"; then
+        log "Detected: HP Spectre"
+      fi
+    
+    # Apple Silicon (if someone manages to run NixOS on it)
+    elif echo "$SYS_VENDOR" | grep -qi "Apple" || [[ "$CPU_VENDOR" == "apple" ]]; then
+      log "Detected: Apple hardware - may need Asahi Linux kernel"
+      # TODO: Could add asahi flake input
+    
+    # System76 - excellent Linux support
+    elif echo "$SYS_VENDOR" | grep -qi "System76"; then
+      NIXOS_HARDWARE_MODULE="system76"
+      log "Detected: System76 - excellent NixOS support"
+    
+    # Purism Librem
+    elif echo "$SYS_VENDOR" | grep -qi "Purism"; then
+      log "Detected: Purism Librem"
+    
+    # Tuxedo
+    elif echo "$SYS_VENDOR" | grep -qi "TUXEDO"; then
+      log "Detected: TUXEDO - may benefit from tuxedo-control-center"
+    fi
+    
+    # Additional detection via CPU for machines where DMI isn't helpful
+    if [[ -z "$NIXOS_HARDWARE_MODULE" ]]; then
+      # Intel CPU generation detection for generic optimizations
+      if [[ "$CPU_VENDOR" == "intel" ]]; then
+        if echo "$CPU_MODEL" | grep -qiE "11th Gen|1[12][0-9]{2}"; then
+          log "Detected: Intel 11th Gen (Tiger Lake)"
+        elif echo "$CPU_MODEL" | grep -qiE "12th Gen|12[0-9]{2}"; then
+          log "Detected: Intel 12th Gen (Alder Lake)"
+        elif echo "$CPU_MODEL" | grep -qiE "13th Gen|13[0-9]{2}"; then
+          log "Detected: Intel 13th Gen (Raptor Lake)"  
+        elif echo "$CPU_MODEL" | grep -qiE "14th Gen|14[0-9]{2}|Core Ultra"; then
+          log "Detected: Intel 14th Gen / Core Ultra (Meteor Lake)"
+        fi
+      elif [[ "$CPU_VENDOR" == "amd" ]]; then
+        if echo "$CPU_MODEL" | grep -qiE "Ryzen.*5[0-9]{3}"; then
+          log "Detected: AMD Ryzen 5000 series (Zen 3)"
+        elif echo "$CPU_MODEL" | grep -qiE "Ryzen.*6[0-9]{3}"; then
+          log "Detected: AMD Ryzen 6000 series (Zen 3+)"
+        elif echo "$CPU_MODEL" | grep -qiE "Ryzen.*7[0-9]{3}"; then
+          log "Detected: AMD Ryzen 7000 series (Zen 4)"
+        elif echo "$CPU_MODEL" | grep -qiE "Ryzen.*8[0-9]{3}|Ryzen AI"; then
+          log "Detected: AMD Ryzen 8000/AI series (Zen 4/5)"
+        fi
       fi
     fi
     
@@ -370,12 +489,15 @@ EOF
     log "Hardware Detection Results:"
     log "  Vendor: $SYS_VENDOR"
     log "  Product: $PRODUCT_NAME"
+    log "  CPU: $CPU_MODEL"
+    log "  RAM: ${RAM_GB}GB (swap recommendation: ${SWAP_SIZE_MB}MB)"
     log "  Architecture: $ARCH"
     log "  Is Laptop: $IS_LAPTOP"
     log "  Is ARM/Snapdragon: $IS_ARM / $IS_SNAPDRAGON"
-    log "  NVIDIA GPU: $HAS_NVIDIA''${NVIDIA_BUS_ID:+ (bus $NVIDIA_BUS_ID)}"
+    log "  NVIDIA GPU: $HAS_NVIDIA''${NVIDIA_BUS_ID:+ (bus $NVIDIA_BUS_ID)}''${NVIDIA_MODEL:+ - $NVIDIA_MODEL}"
     log "  AMD GPU: $HAS_AMD_GPU''${AMD_BUS_ID:+ (bus $AMD_BUS_ID)}"
     log "  Intel GPU: $HAS_INTEL_GPU''${INTEL_BUS_ID:+ (bus $INTEL_BUS_ID)}"
+    log "  WiFi: ''${WIFI_CHIPSET:-unknown}''${WIFI_NEEDS_FIRMWARE:+ (may need firmware)}"
     log "  nixos-hardware module: ''${NIXOS_HARDWARE_MODULE:-none detected}"
     
     # Generate hardware detection report for config generation
@@ -384,6 +506,12 @@ EOF
   "vendor": "$SYS_VENDOR",
   "product": "$PRODUCT_NAME",
   "product_family": "$PRODUCT_FAMILY",
+  "board_name": "$BOARD_NAME",
+  "cpu_model": "$CPU_MODEL",
+  "cpu_vendor": "$CPU_VENDOR",
+  "ram_mb": $RAM_MB,
+  "ram_gb": $RAM_GB,
+  "swap_recommended_mb": $SWAP_SIZE_MB,
   "arch": "$ARCH",
   "is_laptop": $IS_LAPTOP,
   "is_arm": $IS_ARM,
@@ -391,10 +519,13 @@ EOF
   "snapdragon_model": "$SNAPDRAGON_MODEL",
   "has_nvidia": $HAS_NVIDIA,
   "nvidia_bus_id": "$NVIDIA_BUS_ID",
+  "nvidia_model": "$NVIDIA_MODEL",
   "has_amd_gpu": $HAS_AMD_GPU,
   "amd_bus_id": "$AMD_BUS_ID",
   "has_intel_gpu": $HAS_INTEL_GPU,
   "intel_bus_id": "$INTEL_BUS_ID",
+  "wifi_chipset": "$WIFI_CHIPSET",
+  "wifi_needs_firmware": $WIFI_NEEDS_FIRMWARE,
   "nixos_hardware_module": "$NIXOS_HARDWARE_MODULE"
 }
 EOF
@@ -847,6 +978,29 @@ WRAPPER
         
         cp "$HWCONF_SRC" "$HWCONF_DEST"
         
+        # Add auto-detected swap configuration for hibernate support
+        if [[ "$IS_LAPTOP" == "true" && -f "$HWCONF_DEST" ]]; then
+          log "Adding swap configuration for hibernate (${SWAP_SIZE_MB}MB based on ${RAM_GB}GB RAM)..."
+          
+          # Check if swapDevices is already configured
+          if ! grep -q "swapDevices" "$HWCONF_DEST"; then
+            # Add swap configuration before the closing brace
+            # Use a swapfile for simplicity (works with loopback and partition installs)
+            cat >> "$HWCONF_DEST" << SWAPEOF
+
+  # Auto-configured swap for hibernate support
+  # Size: ${SWAP_SIZE_MB}MB (RAM + 2GB buffer for hibernate)
+  swapDevices = [{
+    device = "/swapfile";
+    size = $SWAP_SIZE_MB;
+  }];
+SWAPEOF
+            log "Swap configuration added to hardware-configuration.nix"
+          else
+            log "swapDevices already configured, skipping auto-swap"
+          fi
+        fi
+        
       else
         # Config doesn't import hardware-configuration.nix
         if grep -rq "wsl.enable\|nixos-wsl" "$FLAKE_DIR" 2>/dev/null; then
@@ -977,6 +1131,120 @@ echo "  NixOS Easy Install → Custom URL → $REPO_URL"
 SCRIPT
       chmod +x /mnt/usr/local/bin/nixos-config-publish
       log "Created /usr/local/bin/nixos-config-publish helper script"
+    fi
+    
+    # Create first-boot hibernate configuration script for laptops
+    if [[ "$IS_LAPTOP" == "true" && -f /mnt/swapfile ]] || [[ "$IS_LAPTOP" == "true" ]]; then
+      cat > /mnt/usr/local/bin/setup-hibernate << 'HIBERNATE_SCRIPT'
+#!/usr/bin/env bash
+# Auto-configure hibernate resume parameters
+# Run this after first boot to enable hibernate with suspend-then-hibernate
+
+set -euo pipefail
+
+if [[ $EUID -ne 0 ]]; then
+  echo "This script requires root privileges."
+  exec sudo "$0" "$@"
+fi
+
+SWAPFILE="/swapfile"
+CONFIG_DIR="/etc/nixos"
+
+if [[ ! -f "$SWAPFILE" ]]; then
+  echo "No swapfile found at $SWAPFILE"
+  echo "Creating swapfile first..."
+  # Swapfile should have been created by installer
+  exit 1
+fi
+
+echo "Configuring hibernate resume parameters..."
+
+# Get the device containing the swapfile
+RESUME_DEVICE=$(df "$SWAPFILE" | tail -1 | awk '{print $1}')
+RESUME_UUID=$(blkid -s UUID -o value "$RESUME_DEVICE")
+
+# Get the physical offset of the swapfile
+RESUME_OFFSET=$(filefrag -v "$SWAPFILE" | awk 'NR==4 {print $4}' | sed 's/\.\.//')
+
+if [[ -z "$RESUME_OFFSET" ]]; then
+  echo "Could not determine swapfile offset. Is filefrag available?"
+  exit 1
+fi
+
+echo "Resume device: /dev/disk/by-uuid/$RESUME_UUID"
+echo "Resume offset: $RESUME_OFFSET"
+
+# Find the hardware-configuration.nix file
+HWCONF=""
+for f in "$CONFIG_DIR/hardware-configuration.nix" \
+         "$CONFIG_DIR"/hosts/*/hardware-configuration.nix; do
+  if [[ -f "$f" ]]; then
+    HWCONF="$f"
+    break
+  fi
+done
+
+if [[ -z "$HWCONF" ]]; then
+  echo "Could not find hardware-configuration.nix"
+  echo ""
+  echo "Add these manually to your configuration:"
+  echo "  boot.resumeDevice = \"/dev/disk/by-uuid/$RESUME_UUID\";"
+  echo "  boot.kernelParams = [ \"resume_offset=$RESUME_OFFSET\" ];"
+  exit 1
+fi
+
+echo "Updating $HWCONF..."
+
+# Check if already configured
+if grep -q "resumeDevice" "$HWCONF" && grep -q "resume_offset" "$HWCONF"; then
+  echo "Hibernate already configured!"
+  exit 0
+fi
+
+# Add resume configuration
+if ! grep -q "resumeDevice" "$HWCONF"; then
+  # Add before the closing brace
+  sed -i '/^}$/i\
+  # Hibernate/resume configuration (auto-generated)\
+  boot.resumeDevice = "/dev/disk/by-uuid/'"$RESUME_UUID"'";\
+  boot.kernelParams = [ "resume_offset='"$RESUME_OFFSET"'" ];' "$HWCONF"
+fi
+
+echo ""
+echo "✓ Hibernate configured!"
+echo ""
+echo "Rebuilding NixOS configuration..."
+nixos-rebuild switch
+
+echo ""
+echo "Hibernate is now ready. Test with: systemctl hibernate"
+echo "Suspend-then-hibernate will work automatically with jch.laptop.enable"
+HIBERNATE_SCRIPT
+      chmod +x /mnt/usr/local/bin/setup-hibernate
+      log "Created /usr/local/bin/setup-hibernate helper script"
+      
+      # Also create a systemd service to run this on first boot
+      mkdir -p /mnt/etc/systemd/system
+      cat > /mnt/etc/systemd/system/setup-hibernate.service << 'SYSTEMD_UNIT'
+[Unit]
+Description=Configure hibernate resume parameters
+After=local-fs.target
+ConditionPathExists=/swapfile
+ConditionPathExists=!/var/lib/hibernate-configured
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/setup-hibernate
+ExecStartPost=/usr/bin/touch /var/lib/hibernate-configured
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+SYSTEMD_UNIT
+      # Enable for first boot
+      mkdir -p /mnt/etc/systemd/system/multi-user.target.wants
+      ln -sf ../setup-hibernate.service /mnt/etc/systemd/system/multi-user.target.wants/
+      log "Hibernate will be auto-configured on first boot"
     fi
     
     # ============================================================
