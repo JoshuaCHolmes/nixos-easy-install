@@ -19,7 +19,8 @@
     "root": {
       "inputs": {
         "nixpkgs": "nixpkgs",
-        "rust-overlay": "rust-overlay"
+        "rust-overlay": "rust-overlay",
+        "x1e-nixos-config": "x1e-nixos-config"
       }
     },
     "rust-overlay": {
@@ -39,6 +40,26 @@
       "original": {
         "owner": "oxalica",
         "repo": "rust-overlay",
+        "type": "github"
+      }
+    },
+    "x1e-nixos-config": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1775073230,
+        "narHash": "sha256-cAGbImAWXRvQW3Mv+9Vs/t1b/o4l1HNmZsgV3zfOrXg=",
+        "owner": "kuruczgy",
+        "repo": "x1e-nixos-config",
+        "rev": "44ba71aabc2b9dbe9fd031a6aee917dd7366252a",
+        "type": "github"
+      },
+      "original": {
+        "owner": "kuruczgy",
+        "repo": "x1e-nixos-config",
         "type": "github"
       }
     }

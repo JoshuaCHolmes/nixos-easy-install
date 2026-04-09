@@ -63,6 +63,15 @@ pub struct InstallerApp {
     
     /// Whether dry run has been executed successfully
     dry_run_passed: bool,
+    
+    /// Cleanup operation status
+    cleanup_status: Option<String>,
+    
+    /// Cleanup operation error
+    cleanup_error: Option<String>,
+    
+    /// What was cleaned up
+    cleanup_results: Vec<String>,
 }
 
 #[derive(Default, PartialEq)]
@@ -76,6 +85,7 @@ enum InstallStep {
     Summary,
     Installing,
     Complete,
+    Cleanup,  // Uninstall/cleanup screen
 }
 
 #[derive(Default)]
@@ -161,6 +171,9 @@ impl InstallerApp {
             esp_cleanup_expanded: false,
             dry_run_warnings: Vec::new(),
             dry_run_passed: false,
+            cleanup_status: None,
+            cleanup_error: None,
+            cleanup_results: Vec::new(),
         }
     }
     
@@ -442,9 +455,21 @@ impl InstallerApp {
             // Only allow proceeding if validation passed
             let can_proceed = self.validation.as_ref().map(|v| v.passed).unwrap_or(false);
             
-            ui.add_enabled_ui(can_proceed, |ui| {
-                if ui.button("Get Started →").clicked() {
-                    self.step = InstallStep::InstallType;
+            ui.horizontal(|ui| {
+                ui.add_enabled_ui(can_proceed, |ui| {
+                    if ui.button("Get Started →").clicked() {
+                        self.step = InstallStep::InstallType;
+                    }
+                });
+                
+                ui.add_space(20.0);
+                
+                // Always show cleanup/uninstall option
+                if ui.button("🗑 Cleanup/Uninstall").clicked() {
+                    self.step = InstallStep::Cleanup;
+                    self.cleanup_status = None;
+                    self.cleanup_error = None;
+                    self.cleanup_results.clear();
                 }
             });
             
@@ -1003,32 +1028,35 @@ impl eframe::App for InstallerApp {
             
             ui.separator();
             
-            // Progress indicator
-            ui.horizontal(|ui| {
-                let steps = ["Welcome", "Type", "Config", "Partition", "User", "Summary", "Install"];
-                let current = match self.step {
-                    InstallStep::Welcome => 0,
-                    InstallStep::InstallType => 1,
-                    InstallStep::Configuration => 2,
-                    InstallStep::Partitioning => 3,
-                    InstallStep::UserSetup => 4,
-                    InstallStep::Summary => 5,
-                    InstallStep::Installing | InstallStep::Complete => 6,
-                };
-                
-                for (i, step) in steps.iter().enumerate() {
-                    if i > 0 {
-                        ui.label("→");
+            // Progress indicator (hide for cleanup screen)
+            if self.step != InstallStep::Cleanup {
+                ui.horizontal(|ui| {
+                    let steps = ["Welcome", "Type", "Config", "Partition", "User", "Summary", "Install"];
+                    let current = match self.step {
+                        InstallStep::Welcome => 0,
+                        InstallStep::InstallType => 1,
+                        InstallStep::Configuration => 2,
+                        InstallStep::Partitioning => 3,
+                        InstallStep::UserSetup => 4,
+                        InstallStep::Summary => 5,
+                        InstallStep::Installing | InstallStep::Complete => 6,
+                        InstallStep::Cleanup => 0, // Won't be shown but needed for exhaustiveness
+                    };
+                    
+                    for (i, step) in steps.iter().enumerate() {
+                        if i > 0 {
+                            ui.label("→");
+                        }
+                        if i == current {
+                            ui.strong(*step);
+                        } else if i < current {
+                            ui.label(egui::RichText::new(*step).color(egui::Color32::GREEN));
+                        } else {
+                            ui.label(egui::RichText::new(*step).color(egui::Color32::GRAY));
+                        }
                     }
-                    if i == current {
-                        ui.strong(*step);
-                    } else if i < current {
-                        ui.label(egui::RichText::new(*step).color(egui::Color32::GREEN));
-                    } else {
-                        ui.label(egui::RichText::new(*step).color(egui::Color32::GRAY));
-                    }
-                }
-            });
+                });
+            }
             
             ui.separator();
             ui.add_space(10.0);
@@ -1043,7 +1071,262 @@ impl eframe::App for InstallerApp {
                 InstallStep::Summary => self.render_summary(ui),
                 InstallStep::Installing => self.render_installing(ui),
                 InstallStep::Complete => self.render_complete(ui),
+                InstallStep::Cleanup => self.render_cleanup(ui),
             }
         });
     }
+}
+
+impl InstallerApp {
+    fn render_cleanup(&mut self, ui: &mut egui::Ui) {
+        ui.vertical_centered(|ui| {
+            ui.add_space(20.0);
+            
+            ui.heading("🗑 Cleanup / Uninstall NixOS");
+            
+            ui.add_space(10.0);
+            ui.label("Remove NixOS installation files and boot entries from your system.");
+            
+            ui.add_space(20.0);
+            
+            // Show what exists
+            ui.group(|ui| {
+                ui.heading("Detected Installation Components");
+                ui.add_space(10.0);
+                
+                let nixos_folder = std::path::Path::new("C:\\NixOS");
+                let nixos_exists = nixos_folder.exists();
+                
+                // Check ESP for NixOS folder
+                let esp_nixos_exists = self.system_info.as_ref()
+                    .and_then(|info| info.esp.as_ref())
+                    .map(|esp| esp.mount_point.join("EFI").join("NixOS").exists())
+                    .unwrap_or(false);
+                
+                egui::Grid::new("cleanup_items")
+                    .num_columns(3)
+                    .spacing([20.0, 8.0])
+                    .show(ui, |ui| {
+                        // C:\NixOS folder
+                        ui.label("Loopback files (C:\\NixOS):");
+                        if nixos_exists {
+                            ui.colored_label(egui::Color32::YELLOW, "Found");
+                            // Get size if possible
+                            if let Ok(size) = get_folder_size(nixos_folder) {
+                                ui.label(format!("({})", system::format_bytes(size)));
+                            }
+                        } else {
+                            ui.colored_label(egui::Color32::GRAY, "Not found");
+                            ui.label("");
+                        }
+                        ui.end_row();
+                        
+                        // ESP boot files
+                        ui.label("Boot files (EFI\\NixOS):");
+                        if esp_nixos_exists {
+                            ui.colored_label(egui::Color32::YELLOW, "Found");
+                        } else {
+                            ui.colored_label(egui::Color32::GRAY, "Not found");
+                        }
+                        ui.label("");
+                        ui.end_row();
+                    });
+                
+                if !nixos_exists && !esp_nixos_exists {
+                    ui.add_space(10.0);
+                    ui.colored_label(egui::Color32::GREEN, "✓ No NixOS installation detected");
+                }
+            });
+            
+            // Show cleanup results if any
+            if !self.cleanup_results.is_empty() {
+                ui.add_space(10.0);
+                ui.group(|ui| {
+                    ui.heading("Cleanup Results");
+                    for result in &self.cleanup_results {
+                        ui.label(format!("  ✓ {}", result));
+                    }
+                });
+            }
+            
+            // Show error if any
+            if let Some(ref err) = self.cleanup_error {
+                ui.add_space(10.0);
+                ui.colored_label(egui::Color32::RED, format!("❌ Error: {}", err));
+            }
+            
+            // Show status if running
+            if let Some(ref status) = self.cleanup_status {
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(status);
+                });
+            }
+            
+            ui.add_space(20.0);
+            
+            // Action buttons
+            let nixos_folder = std::path::Path::new("C:\\NixOS");
+            let nixos_exists = nixos_folder.exists();
+            let esp_nixos_exists = self.system_info.as_ref()
+                .and_then(|info| info.esp.as_ref())
+                .map(|esp| esp.mount_point.join("EFI").join("NixOS").exists())
+                .unwrap_or(false);
+            
+            let has_something = nixos_exists || esp_nixos_exists;
+            
+            ui.horizontal(|ui| {
+                // Clean loopback
+                ui.add_enabled_ui(nixos_exists && self.cleanup_status.is_none(), |ui| {
+                    if ui.button("Remove Loopback Files").clicked() {
+                        self.perform_loopback_cleanup();
+                    }
+                });
+                
+                // Clean boot files
+                ui.add_enabled_ui(esp_nixos_exists && self.cleanup_status.is_none(), |ui| {
+                    if ui.button("Remove Boot Files").clicked() {
+                        self.perform_bootloader_cleanup();
+                    }
+                });
+                
+                // Clean everything
+                ui.add_enabled_ui(has_something && self.cleanup_status.is_none(), |ui| {
+                    if ui.button("🗑 Remove Everything").clicked() {
+                        self.perform_full_cleanup();
+                    }
+                });
+            });
+            
+            ui.add_space(20.0);
+            
+            // Back button
+            if ui.button("← Back to Welcome").clicked() {
+                self.step = InstallStep::Welcome;
+                // Refresh system info
+                if let Ok(info) = system::detect_system() {
+                    self.validation = Some(system::validate_requirements(&info));
+                    self.system_info = Some(info);
+                }
+            }
+        });
+    }
+    
+    fn perform_loopback_cleanup(&mut self) {
+        self.cleanup_status = Some("Removing loopback files...".to_string());
+        self.cleanup_error = None;
+        
+        let nixos_path = std::path::Path::new("C:\\NixOS");
+        match crate::loopback::cleanup_loopback(nixos_path) {
+            Ok(()) => {
+                self.cleanup_results.push("Removed C:\\NixOS folder".to_string());
+                self.cleanup_status = None;
+            }
+            Err(e) => {
+                self.cleanup_error = Some(format!("Failed to remove loopback: {}", e));
+                self.cleanup_status = None;
+            }
+        }
+    }
+    
+    fn perform_bootloader_cleanup(&mut self) {
+        self.cleanup_status = Some("Removing boot files...".to_string());
+        self.cleanup_error = None;
+        
+        if let Some(ref info) = self.system_info {
+            if let Some(ref esp) = info.esp {
+                let nixos_folder = esp.mount_point.join("EFI").join("NixOS");
+                
+                // Try to find and remove boot entry
+                // For now just remove the files - bcdedit cleanup is tricky
+                if nixos_folder.exists() {
+                    match std::fs::remove_dir_all(&nixos_folder) {
+                        Ok(()) => {
+                            self.cleanup_results.push("Removed EFI\\NixOS folder".to_string());
+                        }
+                        Err(e) => {
+                            self.cleanup_error = Some(format!("Failed to remove boot files: {}", e));
+                        }
+                    }
+                }
+                
+                // Also try to remove any NixOS boot entries from BCD
+                #[cfg(target_os = "windows")]
+                {
+                    use std::process::Command;
+                    // List boot entries and find NixOS ones
+                    if let Ok(output) = Command::new("bcdedit").args(["/enum", "firmware"]).output() {
+                        let stdout = String::from_utf8_lossy(&output.stdout);
+                        // Look for NixOS entries and delete them
+                        for line in stdout.lines() {
+                            if line.contains("identifier") && line.contains("{") {
+                                // Extract identifier
+                                if let Some(start) = line.find('{') {
+                                    if let Some(end) = line.find('}') {
+                                        let id = &line[start..=end];
+                                        // Check if this is a NixOS entry by looking at subsequent lines
+                                        if stdout.contains("NixOS") && stdout.contains(id) {
+                                            let _ = Command::new("bcdedit")
+                                                .args(["/delete", id])
+                                                .output();
+                                            self.cleanup_results.push(format!("Removed boot entry {}", id));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                self.cleanup_status = None;
+            }
+        } else {
+            self.cleanup_error = Some("No ESP information available".to_string());
+            self.cleanup_status = None;
+        }
+    }
+    
+    fn perform_full_cleanup(&mut self) {
+        self.cleanup_status = Some("Performing full cleanup...".to_string());
+        self.cleanup_error = None;
+        self.cleanup_results.clear();
+        
+        // Clean bootloader first (while paths are known)
+        self.perform_bootloader_cleanup();
+        
+        // Then clean loopback
+        let nixos_path = std::path::Path::new("C:\\NixOS");
+        if nixos_path.exists() {
+            match crate::loopback::cleanup_loopback(nixos_path) {
+                Ok(()) => {
+                    self.cleanup_results.push("Removed C:\\NixOS folder".to_string());
+                }
+                Err(e) => {
+                    if self.cleanup_error.is_none() {
+                        self.cleanup_error = Some(format!("Failed to remove loopback: {}", e));
+                    }
+                }
+            }
+        }
+        
+        self.cleanup_status = None;
+    }
+}
+
+/// Get the total size of a folder
+fn get_folder_size(path: &std::path::Path) -> std::io::Result<u64> {
+    let mut total = 0;
+    if path.is_dir() {
+        for entry in std::fs::read_dir(path)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_dir() {
+                total += get_folder_size(&path).unwrap_or(0);
+            } else {
+                total += entry.metadata()?.len();
+            }
+        }
+    }
+    Ok(total)
 }

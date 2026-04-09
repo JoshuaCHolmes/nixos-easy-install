@@ -9,9 +9,15 @@
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    
+    # Snapdragon X Elite support (ARM64 laptops like Lenovo Yoga Slim 7x)
+    x1e-nixos-config = {
+      url = "github:kuruczgy/x1e-nixos-config";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
-  outputs = { self, nixpkgs, rust-overlay, ... }:
+  outputs = { self, nixpkgs, rust-overlay, x1e-nixos-config, ... }:
     let
       # Support both x86_64 and aarch64 Linux for development
       forAllSystems = nixpkgs.lib.genAttrs [ "x86_64-linux" "aarch64-linux" ];
@@ -19,6 +25,15 @@
       mkPkgs = system: import nixpkgs {
         inherit system;
         overlays = [ rust-overlay.overlays.default ];
+      };
+      
+      # Pkgs with x1e overlay for Snapdragon X Elite
+      mkX1ePkgs = system: import nixpkgs {
+        inherit system;
+        overlays = [ 
+          rust-overlay.overlays.default 
+          x1e-nixos-config.overlays.x1e
+        ];
       };
 
       # Rust toolchain with Windows cross-compilation
@@ -29,6 +44,11 @@
 
       # Build the installer NixOS system for a given architecture
       mkInstallerSystem = pkgs: pkgs.callPackage ./initrd { };
+      
+      # Build installer for Snapdragon X Elite (uses x1e kernel and modules)
+      mkX1eInstallerSystem = pkgs: pkgs.callPackage ./initrd/x1e.nix { 
+        inherit x1e-nixos-config;
+      };
 
     in {
       # Development shell for each system
@@ -63,6 +83,7 @@
               echo "Commands:"
               echo "  cargo build --target x86_64-pc-windows-gnu  # Build Windows exe"
               echo "  nix build .#installer-system                # Build installer initrd"
+              echo "  nix build .#installer-boot-assets-x1e       # Build Snapdragon X1E assets"
               '' else ''
               echo "Note: Windows cross-compilation requires x86_64-linux"
               echo "      Use: nix develop .#x86_64-linux for full build support"
@@ -78,6 +99,7 @@
       packages = forAllSystems (system:
         let
           pkgs = mkPkgs system;
+          x1ePkgs = mkX1ePkgs "aarch64-linux";
           rustToolchain = mkRustToolchain pkgs;
           windowsCross = if system == "x86_64-linux" then pkgs.pkgsCross.mingwW64 else null;
           
@@ -109,7 +131,22 @@
             system = "aarch64-linux"; 
             overlays = [ rust-overlay.overlays.default ];
           })).bootAssets;
-        } else {}));
+          
+          # Snapdragon X Elite specific builds (uses x1e-nixos-config kernel)
+          installer-boot-assets-x1e = (mkX1eInstallerSystem x1ePkgs).bootAssets;
+        } else {}) // (if system == "aarch64-linux" then 
+          let
+            x1ePkgsNative = mkX1ePkgs "aarch64-linux";
+          in {
+            # Native aarch64 builds - useful when building on ARM64 device (like in WSL)
+            installer-boot-assets-x1e = (mkX1eInstallerSystem x1ePkgsNative).bootAssets;
+          } 
+        else {}));
+      
+      # Export the x1e module for users to include in their configs
+      nixosModules = {
+        x1e = x1e-nixos-config.nixosModules.x1e;
+      };
 
       # Installer initrd as a NixOS module for testing (TODO: implement)
       # nixosModules.installer = import ./initrd/module.nix;

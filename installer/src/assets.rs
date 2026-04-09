@@ -151,6 +151,147 @@ pub fn detect_arch() -> &'static str {
     "x86_64"
 }
 
+/// Supported device platforms with specialized hardware support
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HardwarePlatform {
+    /// Standard x86_64 (Intel/AMD)
+    X86_64,
+    /// Standard ARM64 (generic)  
+    Aarch64,
+    /// Snapdragon X Elite (X1E80100) - requires custom kernel
+    SnapdragonX1E,
+}
+
+impl HardwarePlatform {
+    /// Get the architecture string for downloads
+    pub fn arch_string(&self) -> &'static str {
+        match self {
+            Self::X86_64 => "x86_64",
+            Self::Aarch64 => "aarch64",
+            Self::SnapdragonX1E => "aarch64-x1e",
+        }
+    }
+    
+    /// Get the base architecture (for shim/GRUB downloads)
+    pub fn base_arch(&self) -> &'static str {
+        match self {
+            Self::X86_64 => "x86_64",
+            Self::Aarch64 | Self::SnapdragonX1E => "aarch64",
+        }
+    }
+    
+    /// Whether this platform requires special kernel support
+    pub fn needs_custom_kernel(&self) -> bool {
+        matches!(self, Self::SnapdragonX1E)
+    }
+    
+    /// Get a human-readable name
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::X86_64 => "Intel/AMD (x86_64)",
+            Self::Aarch64 => "ARM64 (generic)",
+            Self::SnapdragonX1E => "Snapdragon X Elite",
+        }
+    }
+}
+
+/// Detect if the system is a Snapdragon X Elite device
+/// 
+/// Snapdragon X Elite (X1E80100) devices need special kernel support from
+/// x1e-nixos-config due to unique hardware requirements (device trees, 
+/// kernel parameters, firmware blobs).
+pub fn detect_snapdragon_x1e() -> bool {
+    #[cfg(not(target_os = "windows"))]
+    {
+        return false;
+    }
+    
+    #[cfg(target_os = "windows")]
+    {
+        use std::process::Command;
+        
+        // First check if we're even on ARM64
+        if detect_arch() != "aarch64" {
+            return false;
+        }
+        
+        // Check for Qualcomm processor via WMIC
+        if let Ok(output) = Command::new("wmic")
+            .args(["cpu", "get", "name"])
+            .output()
+        {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            tracing::debug!("WMIC CPU Name: {}", stdout);
+            
+            // Snapdragon X Elite variants
+            if stdout.contains("Snapdragon") && (
+                stdout.contains("X Elite") || 
+                stdout.contains("X1E") ||
+                stdout.contains("X Plus")
+            ) {
+                tracing::info!("Detected Snapdragon X Elite via CPU name");
+                return true;
+            }
+        }
+        
+        // Check via Get-ComputerInfo PowerShell (more reliable for ARM)
+        if let Ok(output) = Command::new("powershell")
+            .args(["-Command", "Get-WmiObject -Class Win32_Processor | Select-Object -ExpandProperty Name"])
+            .output()
+        {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            tracing::debug!("PowerShell CPU Name: {}", stdout);
+            
+            if stdout.contains("Snapdragon") {
+                tracing::info!("Detected Snapdragon X Elite via PowerShell");
+                return true;
+            }
+        }
+        
+        // Check for known Snapdragon X Elite devices by system model
+        if let Ok(output) = Command::new("wmic")
+            .args(["computersystem", "get", "model"])
+            .output()
+        {
+            let stdout = String::from_utf8_lossy(&output.stdout).to_lowercase();
+            tracing::debug!("WMIC System Model: {}", stdout);
+            
+            // Known Snapdragon X Elite devices
+            let x1e_models = [
+                "yoga slim 7x",
+                "thinkpad t14s gen 6",
+                "surface pro",   // Some Surface Pros have Snapdragon
+                "surface laptop", // Some Surface Laptops have Snapdragon
+                "83ed",          // Lenovo Yoga Slim 7x model code
+            ];
+            
+            for model in x1e_models {
+                if stdout.contains(model) {
+                    // Verify it's actually ARM by checking manufacturer
+                    tracing::info!("Detected potential Snapdragon device: {}", model);
+                    return true;
+                }
+            }
+        }
+        
+        false
+    }
+}
+
+/// Get the full hardware platform (with Snapdragon detection)
+pub fn detect_platform() -> HardwarePlatform {
+    let arch = detect_arch();
+    
+    if arch == "aarch64" {
+        if detect_snapdragon_x1e() {
+            return HardwarePlatform::SnapdragonX1E;
+        }
+        return HardwarePlatform::Aarch64;
+    }
+    
+    HardwarePlatform::X86_64
+}
+
 /// Download and extract boot assets for the detected architecture
 /// 
 /// Returns paths to all required EFI binaries for Secure Boot
@@ -236,12 +377,113 @@ pub struct InstallerAssets {
     pub initrd: PathBuf,
     /// Path to the NixOS init (read from init-path file)
     pub init_path: Option<String>,
+    /// Hardware platform this was built for
+    pub platform: Option<String>,
 }
 
 /// GitHub release URL for installer boot assets
 const INSTALLER_RELEASE_BASE: &str = "https://github.com/JoshuaCHolmes/nixos-easy-install/releases/latest/download";
 
-/// Download the NixOS installer kernel and initrd
+/// Download the NixOS installer kernel and initrd for the detected platform
+/// 
+/// Automatically detects Snapdragon X Elite and downloads the appropriate kernel
+pub fn download_installer_assets_auto(cache_dir: &Path) -> Result<InstallerAssets> {
+    let platform = detect_platform();
+    info!("Detected platform: {}", platform.display_name());
+    download_installer_assets_for_platform(cache_dir, platform)
+}
+
+/// Download the NixOS installer kernel and initrd for a specific platform
+pub fn download_installer_assets_for_platform(cache_dir: &Path, platform: HardwarePlatform) -> Result<InstallerAssets> {
+    let arch_str = platform.arch_string();
+    info!("Downloading installer boot files for {} ({})...", platform.display_name(), arch_str);
+    
+    fs::create_dir_all(cache_dir)?;
+    
+    let init_path_file = cache_dir.join("init-path");
+    let platform_file = cache_dir.join("platform");
+    let mut assets = InstallerAssets {
+        kernel: cache_dir.join("bzImage"),
+        initrd: cache_dir.join("initrd"),
+        init_path: None,
+        platform: None,
+    };
+    
+    // Check cache - but verify platform matches
+    if assets.kernel.exists() && assets.initrd.exists() && init_path_file.exists() {
+        let cached_platform = fs::read_to_string(&platform_file).ok().map(|s| s.trim().to_string());
+        
+        // If platform matches (or no platform file exists for older cache), use cache
+        if cached_platform.as_deref() == Some(arch_str) || (cached_platform.is_none() && !platform.needs_custom_kernel()) {
+            assets.init_path = fs::read_to_string(&init_path_file).ok().map(|s| s.trim().to_string());
+            assets.platform = cached_platform;
+            info!("Using cached installer boot files");
+            return Ok(assets);
+        } else {
+            info!("Platform changed from {:?} to {}, re-downloading...", cached_platform, arch_str);
+            // Clear stale cache
+            let _ = fs::remove_file(&assets.kernel);
+            let _ = fs::remove_file(&assets.initrd);
+            let _ = fs::remove_file(&init_path_file);
+        }
+    }
+    
+    // Download tarball
+    let tarball_name = format!("nixos-installer-{}.tar.gz", arch_str);
+    let tarball_url = format!("{}/{}", INSTALLER_RELEASE_BASE, tarball_name);
+    
+    info!("Downloading {}...", tarball_name);
+    let tarball_path = download_file(&tarball_url, cache_dir, &tarball_name)?;
+    
+    // Try to download and verify checksums (warn if unavailable)
+    let checksums_url = format!("{}/SHA256SUMS.txt", INSTALLER_RELEASE_BASE);
+    match download_file(&checksums_url, cache_dir, "SHA256SUMS.txt") {
+        Ok(checksums_path) => {
+            // Verify tarball checksum
+            if let Err(e) = verify_file_checksum(&tarball_path, &checksums_path, &tarball_name) {
+                warn!("Checksum verification failed: {}. Proceeding anyway.", e);
+            } else {
+                info!("Checksum verified for {}", tarball_name);
+            }
+            let _ = fs::remove_file(&checksums_path);
+        }
+        Err(e) => {
+            warn!("Could not download SHA256SUMS.txt: {}. Skipping verification.", e);
+        }
+    }
+    
+    // Extract tarball
+    info!("Extracting installer boot files...");
+    extract_tarball(&tarball_path, cache_dir, arch_str)?;
+    
+    // Clean up tarball
+    let _ = fs::remove_file(&tarball_path);
+    
+    // Verify extraction
+    if !assets.kernel.exists() {
+        bail!("Failed to extract kernel (bzImage)");
+    }
+    if !assets.initrd.exists() {
+        bail!("Failed to extract initrd");
+    }
+    
+    // Read init path if available
+    if init_path_file.exists() {
+        assets.init_path = fs::read_to_string(&init_path_file).ok().map(|s| s.trim().to_string());
+        info!("Init path: {:?}", assets.init_path);
+    } else {
+        warn!("No init-path file found - kernel may fail to boot without init= parameter");
+    }
+    
+    // Store platform for cache validation
+    assets.platform = Some(arch_str.to_string());
+    fs::write(&platform_file, arch_str)?;
+    
+    info!("Installer boot files ready for {}", platform.display_name());
+    Ok(assets)
+}
+
+/// Download the NixOS installer kernel and initrd (legacy - uses base arch only)
 /// 
 /// These are pre-built from the initrd/default.nix and uploaded to GitHub releases
 pub fn download_installer_assets(cache_dir: &Path, arch: &str) -> Result<InstallerAssets> {
@@ -254,6 +496,7 @@ pub fn download_installer_assets(cache_dir: &Path, arch: &str) -> Result<Install
         kernel: cache_dir.join("bzImage"),
         initrd: cache_dir.join("initrd"),
         init_path: None,
+        platform: None,
     };
     
     // Check cache

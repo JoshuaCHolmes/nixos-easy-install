@@ -367,16 +367,19 @@ async fn download_boot_assets(config: &InstallConfig) -> Result<BootFiles> {
     let cache_dir = std::env::temp_dir().join("nixos-install").join("boot-assets");
     
     // Detect architecture at runtime
-    let arch = crate::assets::detect_arch();
+    let platform = crate::assets::detect_platform();
+    let arch = platform.base_arch();
     
-    // Download boot assets for detected architecture
+    info!("Detected platform: {} (arch: {})", platform.display_name(), arch);
+    
+    // Download boot assets for base architecture (shim/GRUB are generic per arch)
     let assets = crate::assets::download_boot_assets_for_arch(&cache_dir, arch)?;
     
     // Verify the downloaded assets
     crate::assets::verify_assets(&assets)?;
     
-    // Download the NixOS installer kernel and initrd
-    let installer_assets = crate::assets::download_installer_assets(&cache_dir, arch)?;
+    // Download the NixOS installer kernel and initrd (platform-specific for X1E)
+    let installer_assets = crate::assets::download_installer_assets_for_platform(&cache_dir, platform)?;
     
     // Generate GRUB config based on install type
     let install_type = &config.install_type;
