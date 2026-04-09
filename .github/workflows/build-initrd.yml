@@ -32,6 +32,7 @@ jobs:
           mkdir -p dist/x86_64
           cp result/bzImage dist/x86_64/
           cp result/initrd dist/x86_64/
+          cp result/init-path dist/x86_64/
           cp result/SHA256SUMS dist/x86_64/
           echo "Built for x86_64:"
           ls -la dist/x86_64/
@@ -63,6 +64,7 @@ jobs:
           mkdir -p dist/aarch64
           cp result/bzImage dist/aarch64/
           cp result/initrd dist/aarch64/
+          cp result/init-path dist/aarch64/
           cp result/SHA256SUMS dist/aarch64/
           echo "Built for aarch64:"
           ls -la dist/aarch64/
