@@ -169,25 +169,40 @@ async fn prepare_partitions(config: &InstallConfig) -> Result<()> {
 }
 
 async fn download_boot_assets(config: &InstallConfig) -> Result<BootFiles> {
-    // TODO: Actually download these files
-    // For now, we'll expect them to be bundled or point to paths
+    // Download Ubuntu's signed shim and GRUB packages
+    let cache_dir = std::env::temp_dir().join("nixos-install").join("boot-assets");
     
-    // These would be:
-    // - shimx64.efi from shim-signed (Microsoft-signed)
-    // - grubx64.efi built/signed for this installer
-    // - MOK certificate
-    // - Initial GRUB config
+    let assets = crate::assets::download_boot_assets(&cache_dir)?;
     
-    // Placeholder paths - these would be extracted from embedded resources
-    // or downloaded from a known URL
-    let temp_dir = std::env::temp_dir().join("nixos-install");
-    std::fs::create_dir_all(&temp_dir)?;
+    // Verify the downloaded assets
+    crate::assets::verify_assets(&assets)?;
+    
+    // Generate GRUB config based on install type
+    let install_type = &config.install_type;
+    let nixos_root = if install_type == "loopback" || install_type == "quick" {
+        config.loopback.as_ref()
+            .map(|l| l.target_dir.clone())
+            .unwrap_or_else(|| "C:\\NixOS".to_string())
+    } else {
+        "/".to_string()
+    };
+    
+    let grub_cfg_content = crate::assets::generate_grub_config(&nixos_root, install_type);
+    let grub_cfg_path = cache_dir.join("grub.cfg");
+    std::fs::write(&grub_cfg_path, grub_cfg_content)?;
+    
+    // We don't need a MOK cert when using Ubuntu's pre-signed chain
+    // Create empty placeholder (bootloader module expects it but won't use it)
+    let mok_path = cache_dir.join("MOK.cer");
+    if !mok_path.exists() {
+        std::fs::write(&mok_path, "")?;
+    }
     
     Ok(BootFiles {
-        shim: temp_dir.join("shimx64.efi"),
-        grub: temp_dir.join("grubx64.efi"),
-        mok_cert: temp_dir.join("MOK.cer"),
-        grub_cfg: temp_dir.join("grub.cfg"),
+        shim: assets.shim_x64,
+        grub: assets.grub_x64,
+        mok_cert: mok_path,
+        grub_cfg: grub_cfg_path,
     })
 }
 

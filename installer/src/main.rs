@@ -8,6 +8,7 @@ mod config;
 mod system;
 mod loopback;
 mod bootloader;
+mod assets;
 
 use anyhow::Result;
 use tracing::info;

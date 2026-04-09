@@ -32,6 +32,13 @@ tracing-subscriber = "0.3"
 # Text parsing
 regex = "1"
 
+# Archive handling
+ar = "0.9"              # .deb files are ar archives
+tar = "0.4"             # data.tar extraction
+xz2 = "0.1"             # .xz decompression
+zstd = "0.13"           # .zst decompression  
+flate2 = "1"            # .gz decompression
+
 # Unix-specific (for non-Windows builds)
 [target.'cfg(not(windows))'.dependencies]
 libc = "0.2"
