@@ -1,7 +1,7 @@
 //! Bootloader setup for UEFI systems
 //! 
 //! This module handles:
-//! 1. Copying boot files to ESP (shimx64.efi, grubx64.efi, etc.)
+//! 1. Copying boot files to ESP (shimaa64.efi/grubaa64.efi for ARM64, shimx64.efi/grubx64.efi for x86_64)
 //! 2. Creating UEFI boot entry via direct NVRAM writes (for ARM64) or bcdedit (x86)
 //! 3. Setting up initial boot configuration
 //! 
@@ -832,11 +832,13 @@ pub fn remove_bootloader(
     
     // Remove our folder from ESP
     if esp_folder.exists() {
-        // Safety check: verify it's our folder
-        let shim = esp_folder.join("shimx64.efi");
-        let grub = esp_folder.join("grubx64.efi");
+        // Safety check: verify it's our folder (check both x86_64 and ARM64 filenames)
+        let shim_x64 = esp_folder.join("shimx64.efi");
+        let shim_aa64 = esp_folder.join("shimaa64.efi");
+        let grub_x64 = esp_folder.join("grubx64.efi");
+        let grub_aa64 = esp_folder.join("grubaa64.efi");
         
-        if shim.exists() || grub.exists() {
+        if shim_x64.exists() || shim_aa64.exists() || grub_x64.exists() || grub_aa64.exists() {
             info!("Removing ESP folder: {:?}", esp_folder);
             fs::remove_dir_all(esp_folder)
                 .context("Failed to remove ESP folder")?;

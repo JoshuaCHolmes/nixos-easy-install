@@ -65,9 +65,8 @@ const GRUB_SIGNED_URL_AA64: &str = "https://ports.ubuntu.com/pool/main/g/grub2-s
 /// These are the checksums of the .deb packages from Ubuntu's official repos
 const SHIM_SIGNED_SHA256_X64: &str = "f8ed71ce2d91a304b6d5eb84997f846f331b554578bc02dbfe78e13ad8ac81a9";
 const GRUB_SIGNED_SHA256_X64: &str = "603fe7db065634780d9576bab48fce8143a0451697c5be75a6cdb1f6a5e39188";
-// ARM64 checksums need to be verified after download
-const SHIM_SIGNED_SHA256_AA64: &str = "";  // TODO: verify
-const GRUB_SIGNED_SHA256_AA64: &str = "";  // TODO: verify
+const SHIM_SIGNED_SHA256_AA64: &str = "48f6301b173cf306cb2ae52aee0b290ded10d01c782fec4b29d73cd5621a5cc4";
+const GRUB_SIGNED_SHA256_AA64: &str = "67666b3c1b97865addb26b4f8fa4b8ca19a62c49466b3a72902f301578dd7bdd";
 
 /// Expected files after extraction
 #[derive(Debug)]
