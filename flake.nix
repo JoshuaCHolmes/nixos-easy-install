@@ -27,6 +27,9 @@
         targets = [ "x86_64-pc-windows-gnu" ];
       };
 
+      # Build the installer NixOS system for a given architecture
+      mkInstallerSystem = pkgs: pkgs.callPackage ./initrd { };
+
     in {
       # Development shell for each system
       devShells = forAllSystems (system:
@@ -59,7 +62,7 @@
               ${if system == "x86_64-linux" then ''
               echo "Commands:"
               echo "  cargo build --target x86_64-pc-windows-gnu  # Build Windows exe"
-              echo "  nix build .#initrd                          # Build installer initrd"
+              echo "  nix build .#installer-system                # Build installer initrd"
               '' else ''
               echo "Note: Windows cross-compilation requires x86_64-linux"
               echo "      Use: nix develop .#x86_64-linux for full build support"
@@ -72,20 +75,43 @@
           };
         });
 
-      # The Windows installer executable (x86_64-linux only for actual cross-compilation)
-      packages.x86_64-linux = 
+      packages = forAllSystems (system:
         let
-          pkgs = mkPkgs "x86_64-linux";
+          pkgs = mkPkgs system;
           rustToolchain = mkRustToolchain pkgs;
-          windowsCross = pkgs.pkgsCross.mingwW64;
-        in {
-          installer = pkgs.callPackage ./installer { inherit rustToolchain windowsCross; };
-          initrd = pkgs.callPackage ./initrd { };
+          windowsCross = if system == "x86_64-linux" then pkgs.pkgsCross.mingwW64 else null;
           
-          default = self.packages.x86_64-linux.installer;
-        };
+          # Build installer system for this architecture (returns an attrset)
+          installerBuild = mkInstallerSystem pkgs;
+        in {
+          # The complete NixOS installer system (toplevel)
+          installer-system = installerBuild.toplevel;
+          
+          # Individual components
+          installer-kernel = installerBuild.kernel;
+          installer-initrd = installerBuild.initrd;
+          
+          # Combined boot assets (kernel + initrd + checksums)
+          installer-boot-assets = installerBuild.bootAssets;
+          
+          default = installerBuild.toplevel;
+        } // (if system == "x86_64-linux" then {
+          # Windows installer - only on x86_64
+          installer = pkgs.callPackage ./installer { inherit rustToolchain windowsCross; };
+          
+          # Cross-compiled installer systems for ARM64 (built on x86_64)
+          installer-system-aarch64 = (mkInstallerSystem (import nixpkgs { 
+            system = "aarch64-linux"; 
+            overlays = [ rust-overlay.overlays.default ];
+          })).toplevel;
+          
+          installer-boot-assets-aarch64 = (mkInstallerSystem (import nixpkgs { 
+            system = "aarch64-linux"; 
+            overlays = [ rust-overlay.overlays.default ];
+          })).bootAssets;
+        } else {}));
 
-      # Installer initrd as a NixOS module for testing
-      nixosModules.installer = import ./initrd/module.nix;
+      # Installer initrd as a NixOS module for testing (TODO: implement)
+      # nixosModules.installer = import ./initrd/module.nix;
     };
 }

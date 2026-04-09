@@ -280,7 +280,7 @@ EOF
     RAM_GB=$((RAM_MB / 1024))
     # For hibernate, swap should be >= RAM. Add 2GB buffer for safety.
     SWAP_SIZE_MB=$((RAM_MB + 2048))
-    log "Detected RAM: ${RAM_GB}GB (${RAM_MB}MB) - Recommended swap: ${SWAP_SIZE_MB}MB"
+    log "Detected RAM: ''${RAM_GB}GB (''${RAM_MB}MB) - Recommended swap: ''${SWAP_SIZE_MB}MB"
     
     # Detect if laptop (chassis types 8, 9, 10, 11, 14 are laptops/portables)
     IS_LAPTOP=false
@@ -490,7 +490,7 @@ EOF
     log "  Vendor: $SYS_VENDOR"
     log "  Product: $PRODUCT_NAME"
     log "  CPU: $CPU_MODEL"
-    log "  RAM: ${RAM_GB}GB (swap recommendation: ${SWAP_SIZE_MB}MB)"
+    log "  RAM: ''${RAM_GB}GB (swap recommendation: ''${SWAP_SIZE_MB}MB)"
     log "  Architecture: $ARCH"
     log "  Is Laptop: $IS_LAPTOP"
     log "  Is ARM/Snapdragon: $IS_ARM / $IS_SNAPDRAGON"
@@ -980,7 +980,7 @@ WRAPPER
         
         # Add auto-detected swap configuration for hibernate support
         if [[ "$IS_LAPTOP" == "true" && -f "$HWCONF_DEST" ]]; then
-          log "Adding swap configuration for hibernate (${SWAP_SIZE_MB}MB based on ${RAM_GB}GB RAM)..."
+          log "Adding swap configuration for hibernate (''${SWAP_SIZE_MB}MB based on ''${RAM_GB}GB RAM)..."
           
           # Check if swapDevices is already configured
           if ! grep -q "swapDevices" "$HWCONF_DEST"; then
@@ -989,7 +989,7 @@ WRAPPER
             cat >> "$HWCONF_DEST" << SWAPEOF
 
   # Auto-configured swap for hibernate support
-  # Size: ${SWAP_SIZE_MB}MB (RAM + 2GB buffer for hibernate)
+  # Size: ''${SWAP_SIZE_MB}MB (RAM + 2GB buffer for hibernate)
   swapDevices = [{
     device = "/swapfile";
     size = $SWAP_SIZE_MB;
@@ -1026,8 +1026,11 @@ SWAPEOF
     if [[ "$FLAKE_TYPE" == "url" && "''${URL_NEEDS_WRAPPER:-false}" == "true" ]]; then
       INSTALL_HOSTNAME="$HOSTNAME"
     elif [[ "$FLAKE_TYPE" == "starter" ]]; then
-      # Starter config uses 'default' as the configuration name
-      INSTALL_HOSTNAME="default"
+      # Starter config uses the actual hostname as the configuration name
+      INSTALL_HOSTNAME="$HOSTNAME"
+    elif [[ "$FLAKE_TYPE" == "minimal" ]]; then
+      # Minimal config uses 'nixos' as the configuration name
+      INSTALL_HOSTNAME="nixos"
     else
       INSTALL_HOSTNAME="$FLAKE_HOSTNAME"
     fi
@@ -1277,59 +1280,90 @@ SYSTEMD_UNIT
 
 in
 # Build a minimal NixOS system for the installer
-(pkgs.nixos {
-  imports = [
-    "${pkgs.path}/nixos/modules/profiles/minimal.nix"
-    "${pkgs.path}/nixos/modules/profiles/all-hardware.nix"
-  ];
-  
-  config = {
-    # Basic system config
-    system.stateVersion = "24.11";
-    
-    # Boot
-    boot.loader.grub.enable = false;
-    boot.loader.systemd-boot.enable = false;
-    
-    # Run installer on boot
-    systemd.services.nixos-easy-installer = {
-      description = "NixOS Easy Install";
-      wantedBy = [ "multi-user.target" ];
-      after = [ "network.target" ];
-      serviceConfig = {
-        Type = "oneshot";
-        ExecStart = "${installerScript}/bin/nixos-easy-installer";
-        StandardInput = "tty";
-        StandardOutput = "tty";
-        TTYPath = "/dev/tty1";
-        TTYReset = true;
-        TTYVHangup = true;
-      };
-    };
-    
-    # Include necessary tools
-    environment.systemPackages = with pkgs; [
-      installerScript
-      git
-      curl
-      jq
-      ntfs3g
-      parted
-      e2fsprogs
-      dosfstools
-      vim
+let
+  nixosSystem = pkgs.nixos {
+    imports = [
+      "${pkgs.path}/nixos/modules/profiles/minimal.nix"
+      "${pkgs.path}/nixos/modules/profiles/all-hardware.nix"
     ];
     
-    # Enable networking
-    networking.networkmanager.enable = true;
-    
-    # Console setup
-    console = {
-      font = "Lat2-Terminus16";
-      keyMap = "us";
+    config = {
+      # Basic system config
+      system.stateVersion = "24.11";
+      
+      # Boot - minimal config for initrd-based installer
+      boot.loader.grub.enable = false;
+      boot.loader.systemd-boot.enable = false;
+      
+      # Dummy root filesystem (required by NixOS, but we're running from initrd)
+      fileSystems."/" = {
+        device = "none";
+        fsType = "tmpfs";
+        options = [ "mode=0755" ];
+      };
+      
+      # Run installer on boot
+      systemd.services.nixos-easy-installer = {
+        description = "NixOS Easy Install";
+        wantedBy = [ "multi-user.target" ];
+        after = [ "network.target" ];
+        serviceConfig = {
+          Type = "oneshot";
+          ExecStart = "${installerScript}/bin/nixos-easy-installer";
+          StandardInput = "tty";
+          StandardOutput = "tty";
+          TTYPath = "/dev/tty1";
+          TTYReset = true;
+          TTYVHangup = true;
+        };
+      };
+      
+      # Include necessary tools
+      environment.systemPackages = with pkgs; [
+        installerScript
+        git
+        curl
+        jq
+        ntfs3g
+        parted
+        e2fsprogs
+        dosfstools
+        vim
+      ];
+      
+      # Enable networking
+      networking.networkmanager.enable = true;
+      
+      # Console setup
+      console = {
+        font = "Lat2-Terminus16";
+        keyMap = "us";
+      };
+      
+      # Minimal services
+      services.getty.autologinUser = "root";
     };
-    
-    # Minimal services
-    services.getty.autologinUser = "root";
   };
-}).config.system.build.toplevel
+in {
+  # The toplevel (for compatibility)
+  toplevel = nixosSystem.config.system.build.toplevel;
+  
+  # Individual components
+  kernel = nixosSystem.config.system.build.kernel;
+  initrd = nixosSystem.config.system.build.initialRamdisk;
+  
+  # Combined boot assets
+  bootAssets = pkgs.runCommand "installer-boot-assets" {
+    nativeBuildInputs = [ pkgs.coreutils ];
+  } ''
+    mkdir -p $out
+    cp ${nixosSystem.config.system.build.kernel}/*Image $out/bzImage 2>/dev/null || \
+      cp ${nixosSystem.config.system.build.kernel}/bzImage $out/bzImage
+    cp ${nixosSystem.config.system.build.initialRamdisk}/initrd $out/initrd
+    cd $out
+    sha256sum bzImage initrd > SHA256SUMS
+  '';
+  
+  # Default is the toplevel for backwards compatibility
+  default = nixosSystem.config.system.build.toplevel;
+}

@@ -34,6 +34,12 @@ pub struct BootFiles {
     
     /// GRUB configuration
     pub grub_cfg: PathBuf,
+    
+    /// NixOS installer kernel (optional, downloaded from release)
+    pub kernel: Option<PathBuf>,
+    
+    /// NixOS installer initrd (optional, downloaded from release)
+    pub initrd: Option<PathBuf>,
 }
 
 /// Result of bootloader setup
@@ -147,11 +153,19 @@ pub fn setup_bootloader(
     fs::create_dir_all(&nixos_folder)
         .context("Failed to create NixOS boot folder")?;
     
-    // Copy boot files
+    // Copy EFI boot files
     copy_boot_file(&boot_files.shim, &nixos_folder.join("shimx64.efi"), "shim")?;
     copy_boot_file(&boot_files.grub, &nixos_folder.join("grubx64.efi"), "GRUB")?;
     copy_boot_file(&boot_files.mok_cert, &nixos_folder.join("MOK.cer"), "MOK certificate")?;
     copy_boot_file(&boot_files.grub_cfg, &nixos_folder.join("grub.cfg"), "GRUB config")?;
+    
+    // Copy NixOS installer kernel and initrd (if provided)
+    if let Some(kernel) = &boot_files.kernel {
+        copy_boot_file(kernel, &nixos_folder.join("bzImage"), "NixOS kernel")?;
+    }
+    if let Some(initrd) = &boot_files.initrd {
+        copy_boot_file(initrd, &nixos_folder.join("initrd"), "NixOS initrd")?;
+    }
     
     // Create UEFI boot entry
     info!("Creating UEFI boot entry...");

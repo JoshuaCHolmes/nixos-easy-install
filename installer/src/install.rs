@@ -371,6 +371,11 @@ async fn download_boot_assets(config: &InstallConfig) -> Result<BootFiles> {
     // Verify the downloaded assets
     crate::assets::verify_assets(&assets)?;
     
+    // Download the NixOS installer kernel and initrd
+    // Detect architecture (for now, always x86_64 on Windows)
+    let arch = if cfg!(target_arch = "aarch64") { "aarch64" } else { "x86_64" };
+    let installer_assets = crate::assets::download_installer_assets(&cache_dir, arch)?;
+    
     // Generate GRUB config based on install type
     let install_type = &config.install_type;
     let nixos_root = if install_type == "loopback" || install_type == "quick" {
@@ -397,6 +402,8 @@ async fn download_boot_assets(config: &InstallConfig) -> Result<BootFiles> {
         grub: assets.grub_x64,
         mok_cert: mok_path,
         grub_cfg: grub_cfg_path,
+        kernel: Some(installer_assets.kernel),
+        initrd: Some(installer_assets.initrd),
     })
 }
 

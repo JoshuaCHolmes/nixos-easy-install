@@ -103,6 +103,133 @@ fn download_file(url: &str, dir: &Path, filename: &str) -> Result<PathBuf> {
     download_file_with_checksum(url, dir, filename, None)
 }
 
+/// Installer boot assets (kernel + initrd)
+#[derive(Debug)]
+pub struct InstallerAssets {
+    pub kernel: PathBuf,
+    pub initrd: PathBuf,
+}
+
+/// GitHub release URL for installer boot assets
+const INSTALLER_RELEASE_BASE: &str = "https://github.com/JoshuaCHolmes/nixos-easy-install/releases/latest/download";
+
+/// Download the NixOS installer kernel and initrd
+/// 
+/// These are pre-built from the initrd/default.nix and uploaded to GitHub releases
+pub fn download_installer_assets(cache_dir: &Path, arch: &str) -> Result<InstallerAssets> {
+    info!("Downloading installer boot files for {}...", arch);
+    
+    fs::create_dir_all(cache_dir)?;
+    
+    let assets = InstallerAssets {
+        kernel: cache_dir.join("bzImage"),
+        initrd: cache_dir.join("initrd"),
+    };
+    
+    // Check cache
+    if assets.kernel.exists() && assets.initrd.exists() {
+        info!("Using cached installer boot files");
+        return Ok(assets);
+    }
+    
+    // Download tarball
+    let tarball_name = format!("nixos-installer-{}.tar.gz", arch);
+    let tarball_url = format!("{}/{}", INSTALLER_RELEASE_BASE, tarball_name);
+    
+    info!("Downloading {}...", tarball_name);
+    let tarball_path = download_file(&tarball_url, cache_dir, &tarball_name)?;
+    
+    // Download checksums
+    let checksums_url = format!("{}/SHA256SUMS.txt", INSTALLER_RELEASE_BASE);
+    let checksums_path = download_file(&checksums_url, cache_dir, "SHA256SUMS.txt")?;
+    
+    // Verify tarball checksum
+    verify_file_checksum(&tarball_path, &checksums_path, &tarball_name)?;
+    
+    // Extract tarball
+    info!("Extracting installer boot files...");
+    extract_tarball(&tarball_path, cache_dir, arch)?;
+    
+    // Clean up tarball
+    let _ = fs::remove_file(&tarball_path);
+    let _ = fs::remove_file(&checksums_path);
+    
+    // Verify extraction
+    if !assets.kernel.exists() {
+        bail!("Failed to extract kernel (bzImage)");
+    }
+    if !assets.initrd.exists() {
+        bail!("Failed to extract initrd");
+    }
+    
+    info!("Installer boot files ready");
+    Ok(assets)
+}
+
+/// Verify a file's SHA256 against a checksums file
+fn verify_file_checksum(file_path: &Path, checksums_path: &Path, filename: &str) -> Result<()> {
+    use sha2::{Sha256, Digest};
+    
+    // Read checksums file
+    let checksums = fs::read_to_string(checksums_path)?;
+    
+    // Find expected checksum for this file
+    let expected = checksums
+        .lines()
+        .find(|line| line.contains(filename))
+        .and_then(|line| line.split_whitespace().next())
+        .context(format!("No checksum found for {} in SHA256SUMS.txt", filename))?;
+    
+    // Calculate actual checksum
+    let mut file = File::open(file_path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 8192];
+    loop {
+        let n = file.read(&mut buffer)?;
+        if n == 0 { break; }
+        hasher.update(&buffer[..n]);
+    }
+    let actual = format!("{:x}", hasher.finalize());
+    
+    if actual != expected {
+        bail!(
+            "Checksum mismatch for {}!\n  Expected: {}\n  Got: {}\n\
+            The download may be corrupted. Please try again.",
+            filename, expected, actual
+        );
+    }
+    
+    debug!("Checksum verified for {}", filename);
+    Ok(())
+}
+
+/// Extract boot files from tarball
+fn extract_tarball(tarball_path: &Path, output_dir: &Path, arch: &str) -> Result<()> {
+    let tarball = File::open(tarball_path)?;
+    let decoder = flate2::read::GzDecoder::new(tarball);
+    let mut archive = tar::Archive::new(decoder);
+    
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        let path = entry.path()?;
+        let path_str = path.to_string_lossy();
+        
+        // Looking for arch/bzImage and arch/initrd
+        let filename = path.file_name()
+            .map(|n| n.to_string_lossy().to_string());
+        
+        if let Some(name) = filename {
+            if path_str.contains(arch) && (name == "bzImage" || name == "initrd") {
+                let dest = output_dir.join(&name);
+                debug!("Extracting {} -> {:?}", path_str, dest);
+                entry.unpack(&dest)?;
+            }
+        }
+    }
+    
+    Ok(())
+}
+
 /// Download a file and verify its SHA256 checksum
 fn download_file_with_checksum(
     url: &str, 
@@ -243,19 +370,15 @@ fn decompress_gzip(data: &[u8]) -> Result<Vec<u8>> {
 
 /// Generate GRUB configuration for NixOS installation
 /// 
-/// This config is used for initial boot into the NixOS installer
+/// This config is used for initial boot into the NixOS installer.
+/// The kernel and initrd are loaded from ESP (where GRUB is), and the
+/// loopback image is passed as a parameter for the installer to mount.
 pub fn generate_grub_config(nixos_root: &str, install_type: &str) -> String {
-    let root_spec = if install_type == "loopback" {
-        format!(r#"
-    # Mount loopback disk image
-    loopback loop {}/root.disk
-    set root=(loop)
-"#, nixos_root)
+    // For loopback install, we pass the disk location as kernel parameter
+    let kernel_params = if install_type == "loopback" || install_type == "quick" {
+        format!("nixos.loopback={}/root.disk", nixos_root.replace("\\", "/"))
     } else {
-        r#"
-    # Direct partition access
-    search --no-floppy --label --set=root NIXOS_ROOT
-"#.to_string()
+        "".to_string()
     };
 
     format!(r#"# NixOS Easy Install - GRUB Configuration
@@ -273,21 +396,22 @@ insmod normal
 insmod linux
 insmod all_video
 
+# ESP contains the kernel and initrd
+# Config file at $prefix/../install-config.json tells installer what to do
+
 menuentry "NixOS Installer" --class nixos --class gnu-linux --class os {{
-    {root_spec}
-    linux /boot/bzImage init=/nix/store/installer-init quiet
-    initrd /boot/initrd
+    # Load kernel and initrd from ESP (same partition as GRUB)
+    linux /EFI/NixOS/bzImage {kernel_params} quiet
+    initrd /EFI/NixOS/initrd
 }}
 
 menuentry "NixOS Installer (verbose)" --class nixos --class gnu-linux --class os {{
-    {root_spec}
-    linux /boot/bzImage init=/nix/store/installer-init
-    initrd /boot/initrd
+    linux /EFI/NixOS/bzImage {kernel_params}
+    initrd /EFI/NixOS/initrd
 }}
 
 menuentry "Windows Boot Manager" --class windows {{
     insmod chain
-    search --no-floppy --fs-uuid --set=root {windows_esp_uuid}
     chainloader /EFI/Microsoft/Boot/bootmgfw.efi
 }}
 
@@ -295,8 +419,7 @@ menuentry "UEFI Firmware Settings" {{
     fwsetup
 }}
 "#, 
-        root_spec = root_spec,
-        windows_esp_uuid = "${ESP_UUID}" // Placeholder, filled at install time
+        kernel_params = kernel_params,
     )
 }
 
@@ -327,20 +450,20 @@ pub fn verify_assets(assets: &BootAssets) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env;
     
     #[test]
     fn test_grub_config_generation() {
         let config = generate_grub_config("/NixOS", "loopback");
         assert!(config.contains("NixOS Installer"));
-        assert!(config.contains("loopback loop"));
+        assert!(config.contains("nixos.loopback=/NixOS/root.disk"));
+        assert!(config.contains("/EFI/NixOS/bzImage"));
         assert!(config.contains("Windows Boot Manager"));
     }
     
     #[test]
     fn test_grub_config_partition() {
         let config = generate_grub_config("/", "partition");
-        assert!(config.contains("NIXOS_ROOT"));
-        assert!(!config.contains("loopback loop"));
+        // Partition install doesn't have loopback parameter
+        assert!(!config.contains("nixos.loopback"));
     }
 }

@@ -1,0 +1,125 @@
+name: Build Installer Initrd
+
+on:
+  push:
+    tags:
+      - 'v*'
+    branches:
+      - main
+    paths:
+      - 'initrd/**'
+      - 'flake.nix'
+      - '.github/workflows/build-initrd.yml'
+  workflow_dispatch:
+
+jobs:
+  build-initrd:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [x86_64-linux, aarch64-linux]
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+        with:
+          extra-conf: |
+            extra-platforms = aarch64-linux
+      
+      - name: Setup Nix cache
+        uses: DeterminateSystems/magic-nix-cache-action@main
+      
+      - name: Build installer system
+        run: |
+          if [[ "${{ matrix.arch }}" == "aarch64-linux" ]]; then
+            # Build ARM64 boot assets (cross-compiled on x86_64 runner)
+            nix build .#packages.x86_64-linux.installer-boot-assets-aarch64 --print-build-logs
+          else
+            nix build .#packages.x86_64-linux.installer-boot-assets --print-build-logs
+          fi
+      
+      - name: Extract kernel and initrd
+        run: |
+          ARCH="${{ matrix.arch }}"
+          ARCH_SHORT="${ARCH%%-linux}"
+          
+          mkdir -p dist/$ARCH_SHORT
+          
+          # Boot assets are pre-packaged
+          cp result/bzImage dist/$ARCH_SHORT/
+          cp result/initrd dist/$ARCH_SHORT/
+          cp result/SHA256SUMS dist/$ARCH_SHORT/
+          
+          echo "Built for $ARCH:"
+          ls -la dist/$ARCH_SHORT/
+          cat dist/$ARCH_SHORT/SHA256SUMS
+      
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: initrd-${{ matrix.arch }}
+          path: dist/
+          retention-days: 7
+  
+  create-release:
+    needs: build-initrd
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      
+      - name: Prepare release assets
+        run: |
+          mkdir -p release
+          
+          # Combine architectures
+          for arch_dir in artifacts/initrd-*/; do
+            arch=$(basename "$arch_dir" | sed 's/initrd-//')
+            cp -r "$arch_dir"/* release/
+          done
+          
+          # Create combined manifest
+          cd release
+          for arch in x86_64 aarch64; do
+            if [[ -d $arch ]]; then
+              (cd $arch && cat SHA256SUMS | sed "s|^|$arch/|") >> ../SHA256SUMS.txt
+            fi
+          done
+          
+          # Create tarballs
+          for arch in x86_64 aarch64; do
+            if [[ -d $arch ]]; then
+              tar czf nixos-installer-$arch.tar.gz $arch/
+            fi
+          done
+          
+          ls -la
+      
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/nixos-installer-x86_64.tar.gz
+            release/nixos-installer-aarch64.tar.gz
+            release/SHA256SUMS.txt
+          body: |
+            ## NixOS Easy Install - Boot Assets
+            
+            Contains the kernel and initrd for the NixOS installer.
+            
+            ### Downloads
+            - `nixos-installer-x86_64.tar.gz` - For Intel/AMD systems
+            - `nixos-installer-aarch64.tar.gz` - For ARM64 systems (Snapdragon, Apple Silicon)
+            
+            ### Checksums
+            See `SHA256SUMS.txt` for verification.
