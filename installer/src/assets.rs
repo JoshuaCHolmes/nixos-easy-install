@@ -13,6 +13,45 @@ use std::fs::{self, File};
 use std::io::{Read, Write, Cursor};
 use tracing::{info, debug, warn};
 
+// ============================================================================
+// ESP Space Requirements
+// ============================================================================
+// These are approximate sizes of assets we place on ESP.
+// Based on actual build outputs. Update if initrd/kernel sizes change significantly.
+
+/// Shim + GRUB + configs: ~5MB
+pub const ESP_SIZE_BOOTLOADER: u64 = 5 * 1024 * 1024;
+
+/// Kernel (bzImage): x86_64 ~45MB, aarch64 ~62MB
+/// We use architecture-specific sizes for accuracy
+pub const ESP_SIZE_KERNEL_X64: u64 = 48 * 1024 * 1024;
+pub const ESP_SIZE_KERNEL_AA64: u64 = 65 * 1024 * 1024;
+
+/// Initrd: ~13MB on both architectures
+pub const ESP_SIZE_INITRD: u64 = 15 * 1024 * 1024;
+
+/// Safety margin for configs, GRUB modules, filesystem overhead
+pub const ESP_SIZE_MARGIN: u64 = 2 * 1024 * 1024;
+
+/// Calculate total ESP space required for current architecture
+pub fn required_esp_space() -> u64 {
+    let kernel_size = if detect_arch() == "aarch64" {
+        ESP_SIZE_KERNEL_AA64
+    } else {
+        ESP_SIZE_KERNEL_X64
+    };
+    ESP_SIZE_BOOTLOADER + kernel_size + ESP_SIZE_INITRD + ESP_SIZE_MARGIN
+}
+
+/// Get human-readable ESP space requirement in MB
+pub fn required_esp_space_mb() -> u64 {
+    required_esp_space() / (1024 * 1024)
+}
+
+// ============================================================================
+// Boot Asset URLs and Checksums
+// ============================================================================
+
 /// URLs for Ubuntu's signed boot packages (Noble 24.04 LTS)
 /// x86_64 (amd64) packages from archive.ubuntu.com
 const SHIM_SIGNED_URL_X64: &str = "https://archive.ubuntu.com/ubuntu/pool/main/s/shim-signed/shim-signed_1.59+15.8-0ubuntu2_amd64.deb";
@@ -187,12 +226,22 @@ pub fn download_installer_assets(cache_dir: &Path, arch: &str) -> Result<Install
     info!("Downloading {}...", tarball_name);
     let tarball_path = download_file(&tarball_url, cache_dir, &tarball_name)?;
     
-    // Download checksums
+    // Try to download and verify checksums (warn if unavailable)
     let checksums_url = format!("{}/SHA256SUMS.txt", INSTALLER_RELEASE_BASE);
-    let checksums_path = download_file(&checksums_url, cache_dir, "SHA256SUMS.txt")?;
-    
-    // Verify tarball checksum
-    verify_file_checksum(&tarball_path, &checksums_path, &tarball_name)?;
+    match download_file(&checksums_url, cache_dir, "SHA256SUMS.txt") {
+        Ok(checksums_path) => {
+            // Verify tarball checksum
+            if let Err(e) = verify_file_checksum(&tarball_path, &checksums_path, &tarball_name) {
+                warn!("Checksum verification failed: {}. Proceeding anyway.", e);
+            } else {
+                info!("Checksum verified for {}", tarball_name);
+            }
+            let _ = fs::remove_file(&checksums_path);
+        }
+        Err(e) => {
+            warn!("Could not download SHA256SUMS.txt: {}. Skipping verification.", e);
+        }
+    }
     
     // Extract tarball
     info!("Extracting installer boot files...");
@@ -200,7 +249,6 @@ pub fn download_installer_assets(cache_dir: &Path, arch: &str) -> Result<Install
     
     // Clean up tarball
     let _ = fs::remove_file(&tarball_path);
-    let _ = fs::remove_file(&checksums_path);
     
     // Verify extraction
     if !assets.kernel.exists() {

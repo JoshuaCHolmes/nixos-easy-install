@@ -69,12 +69,13 @@ pub fn preflight_check(esp: &EspInfo) -> Result<BootPreflight> {
     let mut errors = Vec::new();
     let mut warnings = Vec::new();
     
-    // Check 1: ESP has enough space (we need ~50MB for boot files)
-    const REQUIRED_SPACE: u64 = 50 * 1024 * 1024; // 50MB
-    if esp.free_space < REQUIRED_SPACE {
+    // Check 1: ESP has enough space (use centralized requirement from assets module)
+    let required_space = crate::assets::required_esp_space();
+    if esp.free_space < required_space {
         errors.push(format!(
-            "ESP has insufficient space: {} available, 50MB required",
-            crate::system::format_bytes(esp.free_space)
+            "ESP has insufficient space: {} available, {}MB required",
+            crate::system::format_bytes(esp.free_space),
+            crate::assets::required_esp_space_mb()
         ));
     }
     

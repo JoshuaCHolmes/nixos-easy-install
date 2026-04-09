@@ -9,6 +9,8 @@
 use anyhow::{Context, Result};
 use tracing::{info, debug};
 
+use crate::assets;
+
 // ============================================================================
 // System Information (Read-Only)
 // ============================================================================
@@ -211,12 +213,32 @@ fn detect_esp() -> Result<EspInfo> {
         $esp = Get-Partition | Where-Object { $_.GptType -eq '{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}' } | Select-Object -First 1
         if ($esp) {
             $volume = Get-Volume -Partition $esp -ErrorAction SilentlyContinue
+            
+            # If no drive letter, try to assign one temporarily
+            $driveLetter = $volume.DriveLetter
+            if (-not $driveLetter) {
+                # Find an available drive letter (start from S for System)
+                $usedLetters = (Get-Volume).DriveLetter
+                $availableLetter = 'S','T','U','V','W','X','Y','Z' | Where-Object { $_ -notin $usedLetters } | Select-Object -First 1
+                if ($availableLetter) {
+                    try {
+                        $esp | Add-PartitionAccessPath -AccessPath "$($availableLetter):" -ErrorAction Stop
+                        $driveLetter = $availableLetter
+                    } catch {
+                        # If assigning letter fails, try mountvol approach
+                    }
+                }
+            }
+            
+            # Re-fetch volume info after potential mount
+            $volume = Get-Volume -Partition $esp -ErrorAction SilentlyContinue
+            
             [PSCustomObject]@{
                 DiskNumber = $esp.DiskNumber
                 PartitionNumber = $esp.PartitionNumber
                 Size = $esp.Size
-                DriveLetter = $volume.DriveLetter
-                FreeSpace = $volume.SizeRemaining
+                DriveLetter = $driveLetter
+                FreeSpace = if ($volume) { $volume.SizeRemaining } else { 0 }
                 Guid = $esp.Guid
             } | ConvertTo-Json
         }
@@ -237,10 +259,18 @@ fn detect_esp() -> Result<EspInfo> {
     let parsed: serde_json::Value = serde_json::from_str(json.trim())
         .context("Failed to parse ESP info")?;
     
-    let drive_letter = parsed["DriveLetter"].as_str().map(|s| format!("{}:", s));
+    let drive_letter = parsed["DriveLetter"].as_str()
+        .filter(|s| !s.is_empty())
+        .map(|s| format!("{}:", s));
+    
     let mount_point = drive_letter.as_ref()
         .map(|d| std::path::PathBuf::from(format!("{}\\", d)))
         .unwrap_or_else(|| std::path::PathBuf::from(""));
+    
+    // If still no mount point, the ESP couldn't be accessed
+    if mount_point.as_os_str().is_empty() {
+        anyhow::bail!("ESP found but could not be mounted. Please run as Administrator.");
+    }
     
     Ok(EspInfo {
         disk_number: parsed["DiskNumber"].as_u64().unwrap_or(0) as u32,
@@ -417,15 +447,18 @@ pub fn validate_requirements(info: &SystemInfo) -> ValidationResult {
         warnings.push("Legacy BIOS detected. UEFI is recommended.".to_string());
     }
     
-    // Check ESP exists and has space
+    // Check ESP exists and has enough space for boot assets
+    // Required space is calculated dynamically based on actual asset sizes
     if info.is_uefi {
         match &info.esp {
             Some(esp) => {
-                let esp_free_mb = esp.free_space / (1024 * 1024);
-                if esp_free_mb < 100 {
+                let required = assets::required_esp_space();
+                let required_mb = assets::required_esp_space_mb();
+                if esp.free_space < required {
+                    let free_mb = esp.free_space / (1024 * 1024);
                     errors.push(format!(
-                        "Insufficient ESP space: {}MB free (100MB required)",
-                        esp_free_mb
+                        "Insufficient ESP space: {}MB free ({}MB required for kernel, initrd, bootloader)",
+                        free_mb, required_mb
                     ));
                 }
             }
@@ -546,4 +579,152 @@ pub fn format_bytes(bytes: u64) -> String {
     } else {
         format!("{} B", bytes)
     }
+}
+
+// ============================================================================
+// ESP Analysis and Cleanup
+// ============================================================================
+
+/// Information about a removable item on ESP
+#[derive(Debug, Clone)]
+pub struct EspCleanupItem {
+    /// Path relative to ESP root
+    pub path: String,
+    /// Size in bytes
+    pub size: u64,
+    /// Description of what this is
+    pub description: String,
+    /// Whether it's safe to remove
+    pub safe_to_remove: bool,
+}
+
+/// Analyze ESP for removable boot entries
+/// 
+/// Looks for old Linux installations, recovery partitions, etc.
+#[cfg(windows)]
+pub fn analyze_esp_cleanup(esp: &EspInfo) -> Result<Vec<EspCleanupItem>> {
+    use std::fs;
+    use std::path::Path;
+    
+    let mut items = Vec::new();
+    let efi_dir = esp.mount_point.join("EFI");
+    
+    if !efi_dir.exists() {
+        return Ok(items);
+    }
+    
+    // Known Windows/essential folders to NEVER remove
+    let protected = ["Microsoft", "Boot", "BOOT"];
+    
+    // Known Linux boot folders that are safe to remove if user confirms
+    let linux_folders = [
+        ("NixOS", "Previous NixOS installation"),
+        ("nixos", "Previous NixOS installation"),
+        ("GRUB", "GRUB bootloader (Linux)"),
+        ("grub", "GRUB bootloader (Linux)"),
+        ("ubuntu", "Ubuntu boot files"),
+        ("Ubuntu", "Ubuntu boot files"),
+        ("fedora", "Fedora boot files"),
+        ("Fedora", "Fedora boot files"),
+        ("debian", "Debian boot files"),
+        ("arch", "Arch Linux boot files"),
+        ("Linux", "Generic Linux boot files"),
+        ("systemd", "systemd-boot (Linux)"),
+        ("refind", "rEFInd boot manager"),
+        ("CLOVER", "Clover bootloader"),
+    ];
+    
+    for entry in fs::read_dir(&efi_dir)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        
+        // Skip protected folders
+        if protected.iter().any(|p| p.eq_ignore_ascii_case(&name)) {
+            continue;
+        }
+        
+        let path = entry.path();
+        let size = dir_size(&path).unwrap_or(0);
+        let rel_path = format!("EFI\\{}", name);
+        
+        // Check if it's a known Linux folder
+        let (description, safe) = linux_folders
+            .iter()
+            .find(|(folder, _)| folder.eq_ignore_ascii_case(&name))
+            .map(|(_, desc)| (desc.to_string(), true))
+            .unwrap_or_else(|| (format!("Unknown: {}", name), false));
+        
+        items.push(EspCleanupItem {
+            path: rel_path,
+            size,
+            description,
+            safe_to_remove: safe,
+        });
+    }
+    
+    // Sort by size descending
+    items.sort_by(|a, b| b.size.cmp(&a.size));
+    
+    Ok(items)
+}
+
+#[cfg(not(windows))]
+pub fn analyze_esp_cleanup(_esp: &EspInfo) -> Result<Vec<EspCleanupItem>> {
+    Ok(Vec::new())
+}
+
+/// Calculate directory size recursively
+fn dir_size(path: &std::path::Path) -> Result<u64> {
+    use std::fs;
+    
+    let mut total = 0u64;
+    
+    if path.is_file() {
+        return Ok(fs::metadata(path)?.len());
+    }
+    
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let metadata = entry.metadata()?;
+        
+        if metadata.is_file() {
+            total += metadata.len();
+        } else if metadata.is_dir() {
+            total += dir_size(&entry.path()).unwrap_or(0);
+        }
+    }
+    
+    Ok(total)
+}
+
+/// Remove an ESP cleanup item
+/// 
+/// SAFETY: Only removes folders we've identified as safe Linux boot folders
+#[cfg(windows)]
+pub fn remove_esp_item(esp: &EspInfo, item: &EspCleanupItem) -> Result<()> {
+    use std::fs;
+    
+    if !item.safe_to_remove {
+        anyhow::bail!("Item '{}' is not marked as safe to remove", item.path);
+    }
+    
+    let full_path = esp.mount_point.join(&item.path);
+    
+    info!("Removing ESP item: {:?}", full_path);
+    
+    if full_path.is_dir() {
+        fs::remove_dir_all(&full_path)
+            .with_context(|| format!("Failed to remove {}", item.path))?;
+    } else if full_path.is_file() {
+        fs::remove_file(&full_path)
+            .with_context(|| format!("Failed to remove {}", item.path))?;
+    }
+    
+    info!("Removed: {}", item.path);
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub fn remove_esp_item(_esp: &EspInfo, _item: &EspCleanupItem) -> Result<()> {
+    anyhow::bail!("ESP cleanup not supported on this platform")
 }

@@ -51,6 +51,18 @@ pub struct InstallerApp {
     
     /// Validation errors for current form
     form_errors: Vec<String>,
+    
+    /// ESP cleanup items (populated when ESP space is low)
+    esp_cleanup_items: Option<Vec<system::EspCleanupItem>>,
+    
+    /// Whether ESP cleanup panel is expanded
+    esp_cleanup_expanded: bool,
+    
+    /// Warnings from dry run (non-blocking)
+    dry_run_warnings: Vec<String>,
+    
+    /// Whether dry run has been executed successfully
+    dry_run_passed: bool,
 }
 
 #[derive(Default, PartialEq)]
@@ -108,6 +120,27 @@ impl InstallerApp {
             Err(e) => (None, None, Some(format!("System detection failed: {}", e))),
         };
         
+        // If ESP space is low, analyze for cleanup items
+        let esp_cleanup_items = if let (Some(ref info), Some(ref val)) = (&system_info, &validation) {
+            if !val.passed && info.esp.is_some() {
+                // Check if ESP space error is present
+                let has_esp_error = val.errors.iter().any(|e| e.contains("ESP space") || e.contains("ESP"));
+                if has_esp_error {
+                    if let Some(ref esp) = info.esp {
+                        system::analyze_esp_cleanup(esp).ok()
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        
         Self {
             step: InstallStep::Welcome,
             config: UiInstallConfig {
@@ -124,6 +157,10 @@ impl InstallerApp {
             install_progress: Arc::new(Mutex::new(InstallProgress::default())),
             install_started: false,
             form_errors: Vec::new(),
+            esp_cleanup_items,
+            esp_cleanup_expanded: false,
+            dry_run_warnings: Vec::new(),
+            dry_run_passed: false,
         }
     }
     
@@ -200,6 +237,10 @@ impl InstallerApp {
     
     /// Run a dry-run to test without making changes
     fn run_dry_run(&mut self) {
+        self.form_errors.clear();
+        self.dry_run_warnings.clear();
+        self.dry_run_passed = false;
+        
         let config = match self.build_install_config() {
             Ok(c) => c,
             Err(e) => {
@@ -222,10 +263,8 @@ impl InstallerApp {
         
         match rt.block_on(install::dry_run(config, &system_info, progress_callback)) {
             Ok(report) => {
-                self.form_errors.clear();
-                if report.passed {
-                    self.status = "✓ Dry run passed - ready to install!".to_string();
-                } else {
+                // Collect actual errors (blocking)
+                if !report.passed {
                     for step in &report.steps {
                         if !step.passed {
                             if let Some(ref err) = step.error {
@@ -234,8 +273,16 @@ impl InstallerApp {
                         }
                     }
                 }
+                
+                // Collect warnings (non-blocking)
                 for warning in report.warnings {
-                    self.form_errors.push(format!("Warning: {}", warning));
+                    self.dry_run_warnings.push(warning);
+                }
+                
+                // Mark as passed if no actual errors
+                if self.form_errors.is_empty() {
+                    self.dry_run_passed = true;
+                    self.status = "✓ Dry run passed - ready to install!".to_string();
                 }
             }
             Err(e) => {
@@ -384,6 +431,12 @@ impl InstallerApp {
                 ui.label("Detecting system...");
             }
             
+            // Show ESP cleanup option if available
+            if self.esp_cleanup_items.is_some() {
+                ui.add_space(10.0);
+                self.render_esp_cleanup(ui);
+            }
+            
             ui.add_space(20.0);
             
             // Only allow proceeding if validation passed
@@ -398,6 +451,106 @@ impl InstallerApp {
             if !can_proceed && self.validation.is_some() {
                 ui.add_space(5.0);
                 ui.small("Please resolve the errors above before continuing.");
+            }
+        });
+    }
+    
+    fn render_esp_cleanup(&mut self, ui: &mut egui::Ui) {
+        ui.group(|ui| {
+            let header_text = if self.esp_cleanup_expanded {
+                "🔧 ESP Cleanup Tool ▼"
+            } else {
+                "🔧 ESP Cleanup Tool ▶"
+            };
+            
+            if ui.selectable_label(self.esp_cleanup_expanded, header_text).clicked() {
+                self.esp_cleanup_expanded = !self.esp_cleanup_expanded;
+            }
+            
+            if self.esp_cleanup_expanded {
+                ui.add_space(10.0);
+                ui.label("The following items were found on your EFI System Partition:");
+                ui.label("Remove old/unused Linux boot entries to free space.");
+                ui.add_space(5.0);
+                
+                let mut to_remove: Option<usize> = None;
+                let mut refresh_needed = false;
+                
+                if let Some(ref items) = self.esp_cleanup_items {
+                    for (idx, item) in items.iter().enumerate() {
+                        ui.horizontal(|ui| {
+                            let color = if item.safe_to_remove {
+                                egui::Color32::GREEN
+                            } else {
+                                egui::Color32::YELLOW
+                            };
+                            
+                            let safety = if item.safe_to_remove { "✓ Safe" } else { "⚠ Check" };
+                            ui.colored_label(color, safety);
+                            
+                            ui.label(&item.description);
+                            ui.label(format!("({})", system::format_bytes(item.size)));
+                            
+                            if item.safe_to_remove {
+                                if ui.button("Remove").clicked() {
+                                    to_remove = Some(idx);
+                                }
+                            } else {
+                                ui.label("(Protected)");
+                            }
+                        });
+                    }
+                }
+                
+                // Handle removal outside of borrow
+                if let Some(idx) = to_remove {
+                    if let Some(ref items) = self.esp_cleanup_items.clone() {
+                        if let Some(item) = items.get(idx) {
+                            if let Some(ref info) = self.system_info {
+                                if let Some(ref esp) = info.esp {
+                                    if system::remove_esp_item(esp, item).is_ok() {
+                                        refresh_needed = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // Refresh system info and cleanup items after removal
+                if refresh_needed {
+                    if let Ok(info) = system::detect_system() {
+                        let validation = system::validate_requirements(&info);
+                        
+                        // Re-analyze ESP
+                        let new_cleanup = if let Some(ref esp) = info.esp {
+                            system::analyze_esp_cleanup(esp).ok()
+                        } else {
+                            None
+                        };
+                        
+                        self.system_info = Some(info);
+                        self.validation = Some(validation);
+                        self.esp_cleanup_items = new_cleanup;
+                    }
+                }
+                
+                ui.add_space(10.0);
+                
+                if ui.button("🔄 Refresh").clicked() {
+                    if let Ok(info) = system::detect_system() {
+                        let validation = system::validate_requirements(&info);
+                        let new_cleanup = if let Some(ref esp) = info.esp {
+                            system::analyze_esp_cleanup(esp).ok()
+                        } else {
+                            None
+                        };
+                        
+                        self.system_info = Some(info);
+                        self.validation = Some(validation);
+                        self.esp_cleanup_items = new_cleanup;
+                    }
+                }
             }
         });
     }
@@ -634,7 +787,7 @@ impl InstallerApp {
                 }
             });
         
-        // Show validation errors if any
+        // Show validation errors if any (these block installation)
         if !self.form_errors.is_empty() {
             ui.add_space(20.0);
             ui.group(|ui| {
@@ -643,6 +796,40 @@ impl InstallerApp {
                     ui.label(format!("  • {}", err));
                 }
             });
+        }
+        
+        // Show warnings (non-blocking, but user should be aware)
+        let mut cleanup_nixos_clicked = false;
+        if !self.dry_run_warnings.is_empty() {
+            ui.add_space(10.0);
+            ui.group(|ui| {
+                ui.colored_label(egui::Color32::YELLOW, "⚠ Warnings:");
+                for warning in &self.dry_run_warnings {
+                    ui.horizontal(|ui| {
+                        ui.label(format!("  • {}", warning));
+                        
+                        // Offer cleanup option for existing NixOS folder
+                        if warning.contains("NixOS boot folder already exists") {
+                            if ui.small_button("Clean up").clicked() {
+                                cleanup_nixos_clicked = true;
+                            }
+                        }
+                    });
+                }
+                ui.add_space(5.0);
+                ui.small("These warnings won't prevent installation but you should review them.");
+            });
+        }
+        
+        // Handle cleanup outside of borrow
+        if cleanup_nixos_clicked {
+            self.cleanup_existing_nixos();
+        }
+        
+        // Show dry run success status
+        if self.dry_run_passed && self.form_errors.is_empty() {
+            ui.add_space(10.0);
+            ui.colored_label(egui::Color32::GREEN, &self.status);
         }
         
         ui.add_space(20.0);
@@ -670,15 +857,35 @@ impl InstallerApp {
             
             ui.add_space(10.0);
             
-            // Validate before allowing install
-            let install_button = ui.button("Install NixOS");
-            if install_button.clicked() {
-                if self.validate_form() {
-                    self.step = InstallStep::Installing;
-                    self.start_installation();
+            // Only allow install if dry run passed or user hasn't run it yet
+            let can_install = self.form_errors.is_empty();
+            ui.add_enabled_ui(can_install, |ui| {
+                if ui.button("Install NixOS").clicked() {
+                    if self.validate_form() {
+                        self.step = InstallStep::Installing;
+                        self.start_installation();
+                    }
+                }
+            });
+        });
+    }
+    
+    /// Clean up existing NixOS boot folder on ESP
+    fn cleanup_existing_nixos(&mut self) {
+        if let Some(ref info) = self.system_info {
+            if let Some(ref esp) = info.esp {
+                let nixos_folder = esp.mount_point.join("EFI").join("NixOS");
+                if nixos_folder.exists() {
+                    if let Err(e) = std::fs::remove_dir_all(&nixos_folder) {
+                        self.form_errors.push(format!("Failed to remove NixOS folder: {}", e));
+                    } else {
+                        // Remove the warning and re-run dry run
+                        self.dry_run_warnings.retain(|w| !w.contains("NixOS boot folder"));
+                        self.status = "Cleaned up existing NixOS folder".to_string();
+                    }
                 }
             }
-        });
+        }
     }
     
     fn render_installing(&mut self, ui: &mut egui::Ui) {
