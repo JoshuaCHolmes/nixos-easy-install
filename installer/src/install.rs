@@ -491,16 +491,23 @@ fn verify_setup(state: &InstallState) -> Result<()> {
             bail!("ESP folder not found at {:?}", bootloader.esp_folder);
         }
         
-        // Verify critical boot files exist
-        let shim = bootloader.esp_folder.join("shimx64.efi");
-        let grub = bootloader.esp_folder.join("grubx64.efi");
+        // Verify critical boot files exist (architecture-specific names)
+        let arch = crate::assets::detect_arch();
+        let (shim_name, grub_name) = if arch == "aarch64" {
+            ("shimaa64.efi", "grubaa64.efi")
+        } else {
+            ("shimx64.efi", "grubx64.efi")
+        };
+        
+        let shim = bootloader.esp_folder.join(shim_name);
+        let grub = bootloader.esp_folder.join(grub_name);
         let config = bootloader.esp_folder.join("install-config.json");
         
         if !shim.exists() {
-            bail!("shimx64.efi not found in ESP");
+            bail!("{} not found in ESP", shim_name);
         }
         if !grub.exists() {
-            bail!("grubx64.efi not found in ESP");
+            bail!("{} not found in ESP", grub_name);
         }
         if !config.exists() {
             bail!("install-config.json not found in ESP");

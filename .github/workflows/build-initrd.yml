@@ -104,7 +104,7 @@ jobs:
           cd release
           for arch in x86_64 aarch64; do
             if [[ -d $arch ]]; then
-              (cd $arch && cat SHA256SUMS | sed "s|^|$arch/|") >> ../SHA256SUMS.txt
+              (cd $arch && cat SHA256SUMS | sed "s|^|$arch/|") >> SHA256SUMS.txt
             fi
           done
           
@@ -115,7 +115,10 @@ jobs:
             fi
           done
           
+          echo "Release contents:"
           ls -la
+          echo "SHA256SUMS.txt contents:"
+          cat SHA256SUMS.txt || echo "SHA256SUMS.txt not found!"
       
       - name: Create Release
         uses: softprops/action-gh-release@v2

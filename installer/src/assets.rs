@@ -58,8 +58,8 @@ const SHIM_SIGNED_URL_X64: &str = "https://archive.ubuntu.com/ubuntu/pool/main/s
 const GRUB_SIGNED_URL_X64: &str = "https://archive.ubuntu.com/ubuntu/pool/main/g/grub2-signed/grub-efi-amd64-signed_1.215+2.14-2ubuntu1_amd64.deb";
 
 /// ARM64 (aarch64) packages from ports.ubuntu.com
-const SHIM_SIGNED_URL_AA64: &str = "https://ports.ubuntu.com/pool/main/s/shim-signed/shim-signed_1.58+15.8-0ubuntu1_arm64.deb";
-const GRUB_SIGNED_URL_AA64: &str = "https://ports.ubuntu.com/pool/main/g/grub2-signed/grub-efi-arm64-signed_1.205+2.12-1ubuntu7_arm64.deb";
+const SHIM_SIGNED_URL_AA64: &str = "https://ports.ubuntu.com/pool/main/s/shim-signed/shim-signed_1.59+15.8-0ubuntu2_arm64.deb";
+const GRUB_SIGNED_URL_AA64: &str = "https://ports.ubuntu.com/pool/main/g/grub2-signed/grub-efi-arm64-signed_1.215+2.14-2ubuntu1_arm64.deb";
 
 /// SHA256 checksums for integrity verification
 /// These are the checksums of the .deb packages from Ubuntu's official repos
@@ -93,23 +93,62 @@ pub struct BootAssets {
 
 /// Detect the system architecture at runtime
 pub fn detect_arch() -> &'static str {
-    // Check Windows environment for ARM64
-    #[cfg(windows)]
+    // On Windows ARM64 running x86_64 emulation:
+    // - PROCESSOR_ARCHITECTURE = "AMD64" (emulated)
+    // - PROCESSOR_ARCHITEW6432 = not set (only set for WoW64 32-bit on 64-bit)
+    // 
+    // We need to check the *native* architecture, not the emulated one.
+    // Use a Windows API call or check alternative env vars.
+    
+    // First, check if we're running under ARM64 emulation
+    // The presence of certain ARM64-specific paths or registry can indicate this
+    if let Ok(arch) = std::env::var("PROCESSOR_ARCHITECTURE") {
+        tracing::debug!("PROCESSOR_ARCHITECTURE = {}", arch);
+        
+        if arch == "ARM64" {
+            tracing::info!("Detected native ARM64");
+            return "aarch64";
+        }
+    }
+    
+    // Check PROCESSOR_ARCHITEW6432 (set when 32-bit process runs on 64-bit Windows)
+    if let Ok(arch) = std::env::var("PROCESSOR_ARCHITEW6432") {
+        tracing::debug!("PROCESSOR_ARCHITEW6432 = {}", arch);
+        if arch == "ARM64" {
+            tracing::info!("Detected ARM64 via PROCESSOR_ARCHITEW6432");
+            return "aarch64";
+        }
+    }
+    
+    // Use WMI or registry to detect actual hardware architecture
+    // Check for ARM64 indicator in ProgramFiles path
+    if let Ok(pf) = std::env::var("ProgramFiles(Arm)") {
+        if !pf.is_empty() {
+            tracing::info!("Detected ARM64 via ProgramFiles(Arm) = {}", pf);
+            return "aarch64";
+        }
+    }
+    
+    // Check registry for ARM64 - the existence of ARM64 emulation settings indicates ARM64 hardware
+    #[cfg(target_os = "windows")]
     {
-        // PROCESSOR_ARCHITECTURE is set by Windows
-        if let Ok(arch) = std::env::var("PROCESSOR_ARCHITECTURE") {
-            if arch == "ARM64" {
+        use std::process::Command;
+        // Query system info via wmic
+        if let Ok(output) = Command::new("wmic")
+            .args(["os", "get", "osarchitecture"])
+            .output()
+        {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            tracing::debug!("WMIC OSArchitecture: {}", stdout);
+            if stdout.contains("ARM") {
+                tracing::info!("Detected ARM64 via WMIC");
                 return "aarch64";
             }
         }
     }
     
-    // Fallback to compile-time detection
-    if cfg!(target_arch = "aarch64") {
-        "aarch64"
-    } else {
-        "x86_64"
-    }
+    tracing::info!("Defaulting to x86_64 architecture");
+    "x86_64"
 }
 
 /// Download and extract boot assets for the detected architecture
@@ -477,6 +516,14 @@ pub fn generate_grub_config(nixos_root: &str, install_type: &str) -> String {
         "".to_string()
     };
 
+    // ARM64 EFI requires linuxefi/initrdefi commands, x86_64 uses linux/initrd
+    let arch = detect_arch();
+    let (linux_cmd, initrd_cmd) = if arch == "aarch64" {
+        ("linuxefi", "initrdefi")
+    } else {
+        ("linux", "initrd")
+    };
+
     format!(r#"# NixOS Easy Install - GRUB Configuration
 # Auto-generated - do not edit manually
 
@@ -497,13 +544,13 @@ insmod all_video
 
 menuentry "NixOS Installer" --class nixos --class gnu-linux --class os {{
     # Load kernel and initrd from ESP (same partition as GRUB)
-    linux /EFI/NixOS/bzImage {kernel_params} quiet
-    initrd /EFI/NixOS/initrd
+    {linux_cmd} /EFI/NixOS/bzImage {kernel_params} quiet
+    {initrd_cmd} /EFI/NixOS/initrd
 }}
 
 menuentry "NixOS Installer (verbose)" --class nixos --class gnu-linux --class os {{
-    linux /EFI/NixOS/bzImage {kernel_params}
-    initrd /EFI/NixOS/initrd
+    {linux_cmd} /EFI/NixOS/bzImage {kernel_params}
+    {initrd_cmd} /EFI/NixOS/initrd
 }}
 
 menuentry "Windows Boot Manager" --class windows {{
@@ -515,6 +562,8 @@ menuentry "UEFI Firmware Settings" {{
     fwsetup
 }}
 "#, 
+        linux_cmd = linux_cmd,
+        initrd_cmd = initrd_cmd,
         kernel_params = kernel_params,
     )
 }
