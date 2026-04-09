@@ -10,6 +10,9 @@
 //! - Boot entries are additive (Windows entry remains untouched)
 //! - All operations are reversible by deleting our folder and boot entry
 
+// Some functions are reserved for different boot scenarios
+#![allow(dead_code)]
+
 use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 use std::fs;
@@ -374,7 +377,7 @@ fn copy_boot_file(src: &Path, dst: &Path, name: &str) -> Result<()> {
 /// 
 /// This config boots the NixOS installer ISO to complete installation
 pub fn generate_initial_grub_cfg(
-    install_config_path: &str,
+    _install_config_path: &str,
     nixos_root: &str,
 ) -> String {
     format!(r#"

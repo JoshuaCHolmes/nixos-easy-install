@@ -18,7 +18,10 @@
 //!    - Hold key during POST to override default
 //!    - Varies by motherboard
 
-use anyhow::{Context, Result, bail};
+// Some functions are installed/used in different OS contexts
+#![allow(dead_code)]
+
+use anyhow::{Context, Result};
 use std::path::Path;
 use std::fs;
 use tracing::info;

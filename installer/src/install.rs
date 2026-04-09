@@ -7,7 +7,7 @@
 //! - Progress reporting for UI feedback
 
 use anyhow::{Context, Result, bail};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use tracing::{info, warn, error};
 
 use crate::config::InstallConfig;
@@ -31,8 +31,9 @@ pub struct InstallState {
     pub esp_folder: Option<PathBuf>,
 }
 
-/// Options for installation
+/// Options for installation (reserved for future use)
 #[derive(Debug, Clone, Default)]
+#[allow(dead_code)]
 pub struct InstallOptions {
     /// Dry-run mode: validate everything but don't make changes
     pub dry_run: bool,

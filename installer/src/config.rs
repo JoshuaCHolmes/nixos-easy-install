@@ -180,6 +180,8 @@ impl InstallConfig {
     }
     
     /// Create a new partition install config with validation
+    /// Reserved for full partition installation (not yet implemented in UI)
+    #[allow(dead_code)]
     pub fn new_partition(
         hostname: String,
         username: String,

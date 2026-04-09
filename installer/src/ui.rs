@@ -39,7 +39,8 @@ pub struct InstallerApp {
     /// Any error that occurred
     error: Option<String>,
     
-    /// Whether system detection is in progress
+    /// Whether system detection is in progress (reserved for async detection)
+    #[allow(dead_code)]
     detecting: bool,
     
     /// Shared progress state for install thread
@@ -92,7 +93,8 @@ enum ConfigSource {
     Starter,
     Minimal,
     CustomUrl,
-    LocalPath,
+    #[allow(dead_code)]
+    LocalPath,  // Reserved for future use
 }
 
 impl InstallerApp {

@@ -3,8 +3,11 @@
 //! SAFETY: This module focuses on READ-ONLY operations for system detection.
 //! Any modifying operations are clearly marked and isolated.
 
-use anyhow::{Context, Result};
-use tracing::{info, warn, debug};
+// Some fields are reserved for future use (e.g., full partition install)
+#![allow(dead_code)]
+
+use anyhow::Result;
+use tracing::{info, debug};
 
 // ============================================================================
 // System Information (Read-Only)

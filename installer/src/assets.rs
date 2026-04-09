@@ -4,6 +4,9 @@
 //! These are Microsoft-signed (shim) and Canonical-signed (GRUB), so they work
 //! with Secure Boot out of the box on most systems.
 
+// Some constants are reserved for fallback/verification scenarios
+#![allow(dead_code)]
+
 use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 use std::fs::{self, File};

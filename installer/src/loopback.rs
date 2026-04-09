@@ -7,6 +7,9 @@
 //! 4. Atomic operations where possible
 //! 5. Clear error messages for recovery
 
+// Some fields are for display/reporting purposes
+#![allow(dead_code)]
+
 use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 use std::fs;
