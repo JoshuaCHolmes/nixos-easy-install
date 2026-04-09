@@ -6,7 +6,7 @@
 // Some fields are reserved for future use (e.g., full partition install)
 #![allow(dead_code)]
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tracing::{info, debug};
 
 // ============================================================================
