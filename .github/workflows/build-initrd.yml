@@ -13,58 +13,70 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-initrd:
+  build-x86_64:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        arch: [x86_64-linux, aarch64-linux]
-    
     steps:
       - uses: actions/checkout@v4
       
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@main
-        with:
-          extra-conf: |
-            extra-platforms = aarch64-linux
       
       - name: Setup Nix cache
         uses: DeterminateSystems/magic-nix-cache-action@main
       
-      - name: Build installer system
-        run: |
-          if [[ "${{ matrix.arch }}" == "aarch64-linux" ]]; then
-            # Build ARM64 boot assets (cross-compiled on x86_64 runner)
-            nix build .#packages.x86_64-linux.installer-boot-assets-aarch64 --print-build-logs
-          else
-            nix build .#packages.x86_64-linux.installer-boot-assets --print-build-logs
-          fi
+      - name: Build installer boot assets
+        run: nix build .#packages.x86_64-linux.installer-boot-assets --print-build-logs
       
-      - name: Extract kernel and initrd
+      - name: Prepare artifacts
         run: |
-          ARCH="${{ matrix.arch }}"
-          ARCH_SHORT="${ARCH%%-linux}"
-          
-          mkdir -p dist/$ARCH_SHORT
-          
-          # Boot assets are pre-packaged
-          cp result/bzImage dist/$ARCH_SHORT/
-          cp result/initrd dist/$ARCH_SHORT/
-          cp result/SHA256SUMS dist/$ARCH_SHORT/
-          
-          echo "Built for $ARCH:"
-          ls -la dist/$ARCH_SHORT/
-          cat dist/$ARCH_SHORT/SHA256SUMS
+          mkdir -p dist/x86_64
+          cp result/bzImage dist/x86_64/
+          cp result/initrd dist/x86_64/
+          cp result/SHA256SUMS dist/x86_64/
+          echo "Built for x86_64:"
+          ls -la dist/x86_64/
+          cat dist/x86_64/SHA256SUMS
       
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: initrd-${{ matrix.arch }}
+          name: initrd-x86_64-linux
+          path: dist/
+          retention-days: 7
+
+  build-aarch64:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+      
+      - name: Setup Nix cache
+        uses: DeterminateSystems/magic-nix-cache-action@main
+      
+      - name: Build installer boot assets
+        run: nix build .#packages.aarch64-linux.installer-boot-assets --print-build-logs
+      
+      - name: Prepare artifacts
+        run: |
+          mkdir -p dist/aarch64
+          cp result/bzImage dist/aarch64/
+          cp result/initrd dist/aarch64/
+          cp result/SHA256SUMS dist/aarch64/
+          echo "Built for aarch64:"
+          ls -la dist/aarch64/
+          cat dist/aarch64/SHA256SUMS
+      
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: initrd-aarch64-linux
           path: dist/
           retention-days: 7
   
   create-release:
-    needs: build-initrd
+    needs: [build-x86_64, build-aarch64]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -84,7 +96,7 @@ jobs:
           
           # Combine architectures
           for arch_dir in artifacts/initrd-*/; do
-            arch=$(basename "$arch_dir" | sed 's/initrd-//')
+            arch=$(basename "$arch_dir" | sed 's/initrd-//' | sed 's/-linux//')
             cp -r "$arch_dir"/* release/
           done
           
