@@ -40,6 +40,9 @@ pub struct BootFiles {
     
     /// NixOS installer initrd (optional, downloaded from release)
     pub initrd: Option<PathBuf>,
+    
+    /// Architecture (x86_64 or aarch64)
+    pub arch: String,
 }
 
 /// Result of bootloader setup
@@ -138,7 +141,7 @@ pub fn setup_bootloader(
     boot_files: &BootFiles,
     display_name: &str,
 ) -> Result<BootloaderSetupResult> {
-    info!("Setting up bootloader on ESP at {:?}", esp.mount_point);
+    info!("Setting up {} bootloader on ESP at {:?}", boot_files.arch, esp.mount_point);
     
     // Run preflight
     let preflight = preflight_check(esp)?;
@@ -153,9 +156,16 @@ pub fn setup_bootloader(
     fs::create_dir_all(&nixos_folder)
         .context("Failed to create NixOS boot folder")?;
     
+    // Determine filenames based on architecture
+    let (shim_name, grub_name) = if boot_files.arch == "aarch64" {
+        ("shimaa64.efi", "grubaa64.efi")
+    } else {
+        ("shimx64.efi", "grubx64.efi")
+    };
+    
     // Copy EFI boot files
-    copy_boot_file(&boot_files.shim, &nixos_folder.join("shimx64.efi"), "shim")?;
-    copy_boot_file(&boot_files.grub, &nixos_folder.join("grubx64.efi"), "GRUB")?;
+    copy_boot_file(&boot_files.shim, &nixos_folder.join(shim_name), "shim")?;
+    copy_boot_file(&boot_files.grub, &nixos_folder.join(grub_name), "GRUB")?;
     copy_boot_file(&boot_files.mok_cert, &nixos_folder.join("MOK.cer"), "MOK certificate")?;
     copy_boot_file(&boot_files.grub_cfg, &nixos_folder.join("grub.cfg"), "GRUB config")?;
     
@@ -170,7 +180,7 @@ pub fn setup_bootloader(
     // Create UEFI boot entry
     info!("Creating UEFI boot entry...");
     let boot_entry_id = create_boot_entry(
-        &nixos_folder.join("shimx64.efi"),
+        &nixos_folder.join(shim_name),
         display_name,
     )?;
     

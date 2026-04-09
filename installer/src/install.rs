@@ -366,14 +366,16 @@ async fn download_boot_assets(config: &InstallConfig) -> Result<BootFiles> {
     // Download Ubuntu's signed shim and GRUB packages
     let cache_dir = std::env::temp_dir().join("nixos-install").join("boot-assets");
     
-    let assets = crate::assets::download_boot_assets(&cache_dir)?;
+    // Detect architecture at runtime
+    let arch = crate::assets::detect_arch();
+    
+    // Download boot assets for detected architecture
+    let assets = crate::assets::download_boot_assets_for_arch(&cache_dir, arch)?;
     
     // Verify the downloaded assets
     crate::assets::verify_assets(&assets)?;
     
     // Download the NixOS installer kernel and initrd
-    // Detect architecture (for now, always x86_64 on Windows)
-    let arch = if cfg!(target_arch = "aarch64") { "aarch64" } else { "x86_64" };
     let installer_assets = crate::assets::download_installer_assets(&cache_dir, arch)?;
     
     // Generate GRUB config based on install type
@@ -398,12 +400,13 @@ async fn download_boot_assets(config: &InstallConfig) -> Result<BootFiles> {
     }
     
     Ok(BootFiles {
-        shim: assets.shim_x64,
-        grub: assets.grub_x64,
+        shim: assets.shim,
+        grub: assets.grub,
         mok_cert: mok_path,
         grub_cfg: grub_cfg_path,
         kernel: Some(installer_assets.kernel),
         initrd: Some(installer_assets.initrd),
+        arch: arch.to_string(),
     })
 }
 

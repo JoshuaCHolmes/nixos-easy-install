@@ -13,25 +13,28 @@ use std::fs::{self, File};
 use std::io::{Read, Write, Cursor};
 use tracing::{info, debug, warn};
 
-/// URLs for Ubuntu's signed boot packages (Noble 24.04 LTS / Plucky)
-/// Using HTTPS for security
-const SHIM_SIGNED_URL: &str = "https://archive.ubuntu.com/ubuntu/pool/main/s/shim-signed/shim-signed_1.59+15.8-0ubuntu2_amd64.deb";
-const GRUB_SIGNED_URL: &str = "https://archive.ubuntu.com/ubuntu/pool/main/g/grub2-signed/grub-efi-amd64-signed_1.215+2.14-2ubuntu1_amd64.deb";
+/// URLs for Ubuntu's signed boot packages (Noble 24.04 LTS)
+/// x86_64 (amd64) packages from archive.ubuntu.com
+const SHIM_SIGNED_URL_X64: &str = "https://archive.ubuntu.com/ubuntu/pool/main/s/shim-signed/shim-signed_1.59+15.8-0ubuntu2_amd64.deb";
+const GRUB_SIGNED_URL_X64: &str = "https://archive.ubuntu.com/ubuntu/pool/main/g/grub2-signed/grub-efi-amd64-signed_1.215+2.14-2ubuntu1_amd64.deb";
+
+/// ARM64 (aarch64) packages from ports.ubuntu.com
+const SHIM_SIGNED_URL_AA64: &str = "https://ports.ubuntu.com/pool/main/s/shim-signed/shim-signed_1.58+15.8-0ubuntu1_arm64.deb";
+const GRUB_SIGNED_URL_AA64: &str = "https://ports.ubuntu.com/pool/main/g/grub2-signed/grub-efi-arm64-signed_1.205+2.12-1ubuntu7_arm64.deb";
 
 /// SHA256 checksums for integrity verification
 /// These are the checksums of the .deb packages from Ubuntu's official repos
-/// Verified on 2026-04-09 from archive.ubuntu.com
-const SHIM_SIGNED_SHA256: &str = "f8ed71ce2d91a304b6d5eb84997f846f331b554578bc02dbfe78e13ad8ac81a9";
-const GRUB_SIGNED_SHA256: &str = "603fe7db065634780d9576bab48fce8143a0451697c5be75a6cdb1f6a5e39188";
-
-/// Fallback mirror if primary is slow/unavailable
-const MIRROR_URL: &str = "https://us.archive.ubuntu.com/ubuntu/pool/main";
+const SHIM_SIGNED_SHA256_X64: &str = "f8ed71ce2d91a304b6d5eb84997f846f331b554578bc02dbfe78e13ad8ac81a9";
+const GRUB_SIGNED_SHA256_X64: &str = "603fe7db065634780d9576bab48fce8143a0451697c5be75a6cdb1f6a5e39188";
+// ARM64 checksums need to be verified after download
+const SHIM_SIGNED_SHA256_AA64: &str = "";  // TODO: verify
+const GRUB_SIGNED_SHA256_AA64: &str = "";  // TODO: verify
 
 /// Expected files after extraction
 #[derive(Debug)]
 pub struct BootAssets {
     /// Microsoft-signed shim (first-stage loader)
-    pub shim_x64: PathBuf,
+    pub shim: PathBuf,
     
     /// MokManager for key enrollment (if needed)
     pub mok_manager: PathBuf,
@@ -40,61 +43,106 @@ pub struct BootAssets {
     pub fallback: PathBuf,
     
     /// Canonical-signed GRUB
-    pub grub_x64: PathBuf,
+    pub grub: PathBuf,
     
     /// Directory containing all assets
     pub asset_dir: PathBuf,
+    
+    /// Architecture (x86_64 or aarch64)
+    pub arch: String,
 }
 
-/// Download and extract boot assets
+/// Detect the system architecture at runtime
+pub fn detect_arch() -> &'static str {
+    // Check Windows environment for ARM64
+    #[cfg(windows)]
+    {
+        // PROCESSOR_ARCHITECTURE is set by Windows
+        if let Ok(arch) = std::env::var("PROCESSOR_ARCHITECTURE") {
+            if arch == "ARM64" {
+                return "aarch64";
+            }
+        }
+    }
+    
+    // Fallback to compile-time detection
+    if cfg!(target_arch = "aarch64") {
+        "aarch64"
+    } else {
+        "x86_64"
+    }
+}
+
+/// Download and extract boot assets for the detected architecture
 /// 
 /// Returns paths to all required EFI binaries for Secure Boot
 pub fn download_boot_assets(cache_dir: &Path) -> Result<BootAssets> {
-    info!("Downloading boot assets to {:?}", cache_dir);
+    let arch = detect_arch();
+    download_boot_assets_for_arch(cache_dir, arch)
+}
+
+/// Download and extract boot assets for a specific architecture
+pub fn download_boot_assets_for_arch(cache_dir: &Path, arch: &str) -> Result<BootAssets> {
+    info!("Downloading {} boot assets to {:?}", arch, cache_dir);
     
     fs::create_dir_all(cache_dir)?;
     
-    // Check if we already have cached assets
-    let assets = BootAssets {
-        shim_x64: cache_dir.join("shimx64.efi"),
-        mok_manager: cache_dir.join("mmx64.efi"),
-        fallback: cache_dir.join("fbx64.efi"),
-        grub_x64: cache_dir.join("grubx64.efi"),
-        asset_dir: cache_dir.to_path_buf(),
+    // Determine filenames based on architecture
+    let (shim_name, grub_name, mm_name, fb_name) = if arch == "aarch64" {
+        ("shimaa64.efi", "grubaa64.efi", "mmaa64.efi", "fbaa64.efi")
+    } else {
+        ("shimx64.efi", "grubx64.efi", "mmx64.efi", "fbx64.efi")
     };
     
-    if assets.shim_x64.exists() && assets.grub_x64.exists() {
+    let assets = BootAssets {
+        shim: cache_dir.join(shim_name),
+        mok_manager: cache_dir.join(mm_name),
+        fallback: cache_dir.join(fb_name),
+        grub: cache_dir.join(grub_name),
+        asset_dir: cache_dir.to_path_buf(),
+        arch: arch.to_string(),
+    };
+    
+    // Check cache
+    if assets.shim.exists() && assets.grub.exists() {
         info!("Using cached boot assets");
         return Ok(assets);
     }
     
+    // Select URLs based on architecture
+    let (shim_url, grub_url, grub_signed_name) = if arch == "aarch64" {
+        (SHIM_SIGNED_URL_AA64, GRUB_SIGNED_URL_AA64, "grubaa64.efi.signed")
+    } else {
+        (SHIM_SIGNED_URL_X64, GRUB_SIGNED_URL_X64, "grubx64.efi.signed")
+    };
+    
     // Download shim-signed
-    info!("Downloading shim-signed package...");
-    let shim_deb = download_file(SHIM_SIGNED_URL, cache_dir, "shim-signed.deb")?;
-    extract_deb_efi_files(&shim_deb, cache_dir, &["shimx64.efi", "mmx64.efi", "fbx64.efi"])?;
-    fs::remove_file(&shim_deb)?; // Clean up .deb
+    info!("Downloading shim-signed package for {}...", arch);
+    let shim_deb = download_file(shim_url, cache_dir, "shim-signed.deb")?;
+    extract_deb_efi_files(&shim_deb, cache_dir, &[shim_name, mm_name, fb_name])?;
+    fs::remove_file(&shim_deb)?;
     
     // Download grub-signed
-    info!("Downloading grub-efi-amd64-signed package...");
-    let grub_deb = download_file(GRUB_SIGNED_URL, cache_dir, "grub-signed.deb")?;
-    extract_deb_efi_files(&grub_deb, cache_dir, &["grubx64.efi.signed"])?;
+    info!("Downloading grub-signed package for {}...", arch);
+    let grub_deb = download_file(grub_url, cache_dir, "grub-signed.deb")?;
+    extract_deb_efi_files(&grub_deb, cache_dir, &[grub_signed_name])?;
     fs::remove_file(&grub_deb)?;
     
-    // Rename grubx64.efi.signed to grubx64.efi
-    let signed_grub = cache_dir.join("grubx64.efi.signed");
+    // Rename signed grub to standard name
+    let signed_grub = cache_dir.join(grub_signed_name);
     if signed_grub.exists() {
-        fs::rename(&signed_grub, &assets.grub_x64)?;
+        fs::rename(&signed_grub, &assets.grub)?;
     }
     
-    // Verify we got everything
-    if !assets.shim_x64.exists() {
-        bail!("Failed to extract shimx64.efi");
+    // Verify extraction
+    if !assets.shim.exists() {
+        bail!("Failed to extract {}", shim_name);
     }
-    if !assets.grub_x64.exists() {
-        bail!("Failed to extract grubx64.efi");
+    if !assets.grub.exists() {
+        bail!("Failed to extract {}", grub_name);
     }
     
-    info!("Boot assets ready");
+    info!("Boot assets ready for {}", arch);
     Ok(assets)
 }
 
@@ -425,10 +473,17 @@ menuentry "UEFI Firmware Settings" {{
 
 /// Verify the integrity of downloaded assets
 pub fn verify_assets(assets: &BootAssets) -> Result<()> {
+    // Determine expected names based on architecture
+    let (shim_name, grub_name) = if assets.arch == "aarch64" {
+        ("shimaa64.efi", "grubaa64.efi")
+    } else {
+        ("shimx64.efi", "grubx64.efi")
+    };
+    
     // Check files exist and have reasonable sizes
     let checks = [
-        (&assets.shim_x64, "shimx64.efi", 1_000_000, 2_000_000),  // ~1.2MB typically
-        (&assets.grub_x64, "grubx64.efi", 1_500_000, 4_000_000),  // ~2-3MB typically
+        (&assets.shim, shim_name, 800_000, 2_500_000),   // shim varies by arch
+        (&assets.grub, grub_name, 1_500_000, 5_000_000), // grub varies by arch
     ];
     
     for (path, name, min_size, max_size) in checks {
@@ -443,7 +498,7 @@ pub fn verify_assets(assets: &BootAssets) -> Result<()> {
         }
     }
     
-    info!("Boot asset verification passed");
+    info!("Boot asset verification passed for {}", assets.arch);
     Ok(())
 }
 
