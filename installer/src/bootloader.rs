@@ -457,7 +457,7 @@ fn enable_firmware_privilege() -> Result<()> {
 /// Read current BootOrder UEFI variable
 #[cfg(windows)]
 fn read_boot_order() -> Result<Vec<u16>> {
-    use windows::Win32::System::SystemInformation::GetFirmwareEnvironmentVariableW;
+    use windows::Win32::System::WindowsProgramming::GetFirmwareEnvironmentVariableW;
     use windows::core::PCWSTR;
     
     const EFI_GLOBAL_GUID: &str = "{8BE4DF61-93CA-11D2-AA0D-00E098032B8C}";
@@ -513,7 +513,7 @@ fn find_next_boot_number(boot_order: &[u16]) -> u16 {
 /// Write BootOrder UEFI variable
 #[cfg(windows)]
 fn write_boot_order(boot_order: &[u16]) -> Result<()> {
-    use windows::Win32::System::SystemInformation::SetFirmwareEnvironmentVariableExW;
+    use windows::Win32::System::WindowsProgramming::SetFirmwareEnvironmentVariableExW;
     use windows::core::PCWSTR;
     
     const EFI_GLOBAL_GUID: &str = "{8BE4DF61-93CA-11D2-AA0D-00E098032B8C}";
@@ -547,7 +547,7 @@ fn write_boot_order(boot_order: &[u16]) -> Result<()> {
 /// Write a UEFI variable
 #[cfg(windows)]
 fn write_uefi_variable(name: &str, guid: &str, data: &[u8]) -> Result<()> {
-    use windows::Win32::System::SystemInformation::SetFirmwareEnvironmentVariableExW;
+    use windows::Win32::System::WindowsProgramming::SetFirmwareEnvironmentVariableExW;
     use windows::core::PCWSTR;
     
     // VARIABLE_ATTRIBUTE_NON_VOLATILE | VARIABLE_ATTRIBUTE_BOOTSERVICE_ACCESS | VARIABLE_ATTRIBUTE_RUNTIME_ACCESS
