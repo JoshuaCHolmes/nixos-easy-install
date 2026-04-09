@@ -11,6 +11,7 @@ use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 use std::fs::{self, File};
 use std::io::{Read, Write, Cursor};
+use std::time::Duration;
 use tracing::{info, debug, warn};
 
 // ============================================================================
@@ -390,7 +391,14 @@ fn download_file_with_checksum(
     
     debug!("Downloading {} -> {:?}", url, dest);
     
-    let response = reqwest::blocking::get(url)
+    // Use a client with extended timeouts for large files
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(300))  // 5 minute timeout for large downloads
+        .connect_timeout(Duration::from_secs(30))
+        .build()
+        .context("Failed to create HTTP client")?;
+    
+    let response = client.get(url).send()
         .with_context(|| format!("Failed to download {}", url))?;
     
     if !response.status().is_success() {
