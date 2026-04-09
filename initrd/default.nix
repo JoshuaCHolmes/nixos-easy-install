@@ -207,6 +207,93 @@ EOF
         rm -rf "$FLAKE_DIR"
         git clone --depth 1 https://github.com/JoshuaCHolmes/nixos-starter-config "$FLAKE_DIR" || \
           fail "Could not clone starter config"
+        
+        # Customize the starter config with user's settings
+        log "Customizing starter configuration..."
+        
+        # Detect system architecture
+        ARCH=$(uname -m)
+        if [[ "$ARCH" == "aarch64" ]]; then
+          SYSTEM="aarch64-linux"
+        else
+          SYSTEM="x86_64-linux"
+        fi
+        
+        # Rename hosts/default to hosts/<hostname> for proper multi-machine support
+        if [[ -d "$FLAKE_DIR/hosts/default" ]]; then
+          mv "$FLAKE_DIR/hosts/default" "$FLAKE_DIR/hosts/$HOSTNAME"
+          log "Renamed hosts/default to hosts/$HOSTNAME"
+        fi
+        
+        # Rewrite flake.nix to use hostname-based configuration
+        cat > "$FLAKE_DIR/flake.nix" << FLAKE
+{
+  description = "My NixOS Configuration";
+
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+
+    home-manager = {
+      url = "github:nix-community/home-manager";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+  };
+
+  outputs = { self, nixpkgs, home-manager, ... }: 
+  let
+    mkHost = { 
+      system, 
+      hostname, 
+      username ? "$USERNAME",
+      extraModules ? [],
+    }: nixpkgs.lib.nixosSystem {
+      inherit system;
+      specialArgs = { inherit self username; };
+      modules = [
+        home-manager.nixosModules.home-manager
+        ./modules/common.nix
+        {
+          networking.hostName = hostname;
+          home-manager.users.\''${username} = import ./home;
+          home-manager.extraSpecialArgs = { inherit username; };
+        }
+      ] ++ extraModules;
+    };
+  in
+  {
+    nixosConfigurations = {
+      # $HOSTNAME - installed $(date +%Y-%m-%d)
+      "$HOSTNAME" = mkHost {
+        system = "$SYSTEM";
+        hostname = "$HOSTNAME";
+        username = "$USERNAME";
+        extraModules = [
+          ./hosts/$HOSTNAME
+        ];
+      };
+
+      # To add another machine:
+      # 1. Create hosts/<new-hostname>/default.nix
+      # 2. Copy hardware-configuration.nix from the new machine
+      # 3. Add a new entry here following the pattern above
+    };
+  };
+}
+FLAKE
+        
+        # Add user password to common.nix
+        if [[ -f "$FLAKE_DIR/modules/common.nix" ]]; then
+          sed -i "/isNormalUser = true;/a\\    hashedPassword = \"$PASSWORD_HASH\";" "$FLAKE_DIR/modules/common.nix"
+        fi
+        
+        # Remove upstream git history - this is now the user's config
+        rm -rf "$FLAKE_DIR/.git"
+        git -C "$FLAKE_DIR" init
+        git -C "$FLAKE_DIR" add -A
+        git -C "$FLAKE_DIR" commit -m "Initial NixOS configuration for $HOSTNAME"
+        
+        log "Starter config customized: hostname=$HOSTNAME, user=$USERNAME"
+        log "Config initialized as fresh git repo (no upstream tracking)"
         # Hardware config will be handled in the integration section below
         ;;
         
@@ -281,8 +368,172 @@ CONF
         
       url)
         log "Cloning configuration from $FLAKE_URL..."
-        rm -rf "$FLAKE_DIR"
-        git clone --depth 1 "$FLAKE_URL" "$FLAKE_DIR" || fail "Could not clone $FLAKE_URL"
+        
+        # Clone the config
+        ORIG_CONFIG="/mnt/etc/nixos-original"
+        rm -rf "$ORIG_CONFIG"
+        git clone "$FLAKE_URL" "$ORIG_CONFIG" || fail "Could not clone $FLAKE_URL"
+        
+        # Check if this config already has a host definition for this hostname
+        if grep -q "\"$HOSTNAME\"" "$ORIG_CONFIG/flake.nix" 2>/dev/null; then
+          log "Found existing host definition for $HOSTNAME"
+          rm -rf "$FLAKE_DIR"
+          mv "$ORIG_CONFIG" "$FLAKE_DIR"
+          URL_NEEDS_WRAPPER=false
+          URL_NEEDS_NEW_HOST=false
+          
+        # Check if config has hosts/ structure (multi-machine config)
+        elif [[ -d "$ORIG_CONFIG/hosts" ]] && grep -rq "hardware-configuration" "$ORIG_CONFIG"/**/*.nix 2>/dev/null; then
+          log "Detected multi-machine config with hosts/ structure"
+          log "Adding new host: $HOSTNAME"
+          
+          rm -rf "$FLAKE_DIR"
+          mv "$ORIG_CONFIG" "$FLAKE_DIR"
+          URL_NEEDS_WRAPPER=false
+          URL_NEEDS_NEW_HOST=true
+          
+          # Create new host directory
+          mkdir -p "$FLAKE_DIR/hosts/$HOSTNAME"
+          
+          # Copy template from existing host or create minimal one
+          EXISTING_HOST=$(ls -1 "$FLAKE_DIR/hosts" | grep -v "wsl" | head -1)
+          if [[ -n "$EXISTING_HOST" && -f "$FLAKE_DIR/hosts/$EXISTING_HOST/default.nix" ]]; then
+            cp "$FLAKE_DIR/hosts/$EXISTING_HOST/default.nix" "$FLAKE_DIR/hosts/$HOSTNAME/default.nix"
+            log "Copied host template from $EXISTING_HOST"
+          else
+            # Create minimal host config
+            cat > "$FLAKE_DIR/hosts/$HOSTNAME/default.nix" << 'HOSTCONF'
+{ config, lib, pkgs, ... }:
+
+{
+  imports = [
+    ./hardware-configuration.nix
+  ];
+
+  boot.loader.systemd-boot.enable = true;
+  boot.loader.efi.canTouchEfiVariables = true;
+
+  system.stateVersion = "24.11";
+}
+HOSTCONF
+          fi
+          
+          # Hardware config will be copied in integration section
+          
+          # Add host entry to flake.nix
+          # Find the pattern used and add a new entry
+          ARCH=$(uname -m)
+          if [[ "$ARCH" == "aarch64" ]]; then
+            SYSTEM="aarch64-linux"
+          else
+            SYSTEM="x86_64-linux"
+          fi
+          
+          # Try to add entry to flake.nix (before the closing brace of nixosConfigurations)
+          # This is fragile but covers common patterns
+          if grep -q "mkHost" "$FLAKE_DIR/flake.nix"; then
+            # Uses mkHost pattern - add similar entry
+            sed -i "/nixosConfigurations = {/a\\\\n      # $HOSTNAME - added $(date +%Y-%m-%d)\\n      \"$HOSTNAME\" = mkHost {\\n        system = \"$SYSTEM\";\\n        hostname = \"$HOSTNAME\";\\n        username = \"$USERNAME\";\\n        extraModules = [\\n          ./hosts/$HOSTNAME\\n        ];\\n      };" "$FLAKE_DIR/flake.nix"
+          else
+            log "WARNING: Could not auto-add host to flake.nix"
+            log "         You may need to manually add $HOSTNAME to nixosConfigurations"
+          fi
+          
+          # Commit the new host
+          git -C "$FLAKE_DIR" add -A
+          git -C "$FLAKE_DIR" commit -m "Add host: $HOSTNAME" || true
+          
+        # Config imports hardware-configuration.nix somewhere
+        elif grep -rq "hardware-configuration" "$ORIG_CONFIG"/*.nix "$ORIG_CONFIG"/**/*.nix 2>/dev/null; then
+          log "Config imports hardware-configuration.nix - using directly"
+          rm -rf "$FLAKE_DIR"
+          mv "$ORIG_CONFIG" "$FLAKE_DIR"
+          URL_NEEDS_WRAPPER=false
+          URL_NEEDS_NEW_HOST=false
+          
+        # WSL config (doesn't need hardware config)
+        elif grep -rq "wsl.enable\|nixos-wsl" "$ORIG_CONFIG" 2>/dev/null; then
+          log "Detected WSL configuration - using directly (no hardware config needed)"
+          rm -rf "$FLAKE_DIR"
+          mv "$ORIG_CONFIG" "$FLAKE_DIR"
+          URL_NEEDS_WRAPPER=false
+          URL_NEEDS_NEW_HOST=false
+          
+        # No hardware import - need wrapper
+        else
+          log "Config doesn't import hardware-configuration.nix"
+          log "Creating wrapper flake to inject hardware support..."
+          URL_NEEDS_WRAPPER=true
+          URL_NEEDS_NEW_HOST=false
+          
+          # Create wrapper flake that uses extendModules
+          rm -rf "$FLAKE_DIR"
+          mkdir -p "$FLAKE_DIR"
+          
+          # Copy hardware config to wrapper
+          cp /mnt/etc/nixos-generated/hardware-configuration.nix "$FLAKE_DIR/"
+          
+          cat > "$FLAKE_DIR/flake.nix" << 'WRAPPER'
+{
+  description = "NixOS Easy Install - Wrapper for custom configuration";
+  
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    
+    user-config = {
+WRAPPER
+          # Add the URL dynamically (outside of heredoc to avoid escaping issues)
+          echo "      url = \"$FLAKE_URL\";" >> "$FLAKE_DIR/flake.nix"
+          
+          cat >> "$FLAKE_DIR/flake.nix" << 'WRAPPER'
+    };
+  };
+  
+  outputs = { self, nixpkgs, user-config, ... }:
+  let
+    # Find the target configuration in the user's flake
+WRAPPER
+          # Add hostname references
+          echo "    targetHostname = \"$FLAKE_HOSTNAME\";" >> "$FLAKE_DIR/flake.nix"
+          echo "    newHostname = \"$HOSTNAME\";" >> "$FLAKE_DIR/flake.nix"
+          echo "    username = \"$USERNAME\";" >> "$FLAKE_DIR/flake.nix"
+          echo "    passwordHash = \"$PASSWORD_HASH\";" >> "$FLAKE_DIR/flake.nix"
+          
+          cat >> "$FLAKE_DIR/flake.nix" << 'WRAPPER'
+    
+    # Get the original system - try exact hostname first, then first available
+    originalSystem = 
+      user-config.nixosConfigurations.''${targetHostname} or
+      (builtins.head (builtins.attrValues user-config.nixosConfigurations));
+    
+    # Use extendModules to add hardware config to the original system
+    extendedSystem = originalSystem.extendModules {
+      modules = [
+        ./hardware-configuration.nix
+        
+        # Override hostname
+        { networking.hostName = nixpkgs.lib.mkForce newHostname; }
+        
+        # Ensure user exists with password
+        ({ config, lib, ... }: {
+          users.users.''${username} = lib.mkIf (!config.users.users ? username) {
+            isNormalUser = true;
+            extraGroups = [ "wheel" "networkmanager" "video" "audio" ];
+            hashedPassword = passwordHash;
+          };
+          # Also set password for existing user if they exist but have no password set
+          users.users.''${username}.hashedPassword = lib.mkDefault passwordHash;
+        })
+      ];
+    };
+  in {
+    nixosConfigurations.''${newHostname} = extendedSystem;
+  };
+}
+WRAPPER
+          log "Wrapper flake created at $FLAKE_DIR"
+          log "Original config preserved at $ORIG_CONFIG for reference"
+        fi
         ;;
         
       local)
@@ -298,37 +549,37 @@ CONF
     # Hardware configuration integration
     # ============================================================
     
-    # For non-minimal configs, we need to ensure hardware-configuration.nix is imported
-    if [[ "$FLAKE_TYPE" != "minimal" && -f "$FLAKE_DIR/flake.nix" ]]; then
-      log "Checking hardware configuration integration..."
+    HWCONF_SRC="/mnt/etc/nixos-generated/hardware-configuration.nix"
+    
+    # Skip if URL type with wrapper (hardware config already included in wrapper)
+    if [[ "$FLAKE_TYPE" == "url" && "''${URL_NEEDS_WRAPPER:-false}" == "true" ]]; then
+      log "Hardware config already integrated via wrapper flake"
       
-      HWCONF_SRC="/mnt/etc/nixos-generated/hardware-configuration.nix"
+    # Skip for minimal (already has hardware-configuration.nix at root)
+    elif [[ "$FLAKE_TYPE" == "minimal" ]]; then
+      log "Hardware config already at root level (minimal config)"
       
-      # Try to find where the config expects hardware-configuration.nix
-      # Common patterns:
-      #   1. ./hardware-configuration.nix (root level)
-      #   2. ./hosts/<hostname>/hardware-configuration.nix
-      #   3. Not imported at all (WSL configs, etc.)
+    # For starter and url (direct use), we need to place hardware-configuration.nix
+    elif [[ -f "$FLAKE_DIR/flake.nix" ]]; then
+      log "Integrating hardware configuration..."
       
-      # Check if flake.nix or any .nix file imports hardware-configuration.nix
+      # Check if config imports hardware-configuration.nix
       if grep -rq "hardware-configuration" "$FLAKE_DIR"/*.nix "$FLAKE_DIR"/**/*.nix 2>/dev/null; then
         log "Config imports hardware-configuration.nix"
         
-        # Find where it's expected
-        IMPORT_PATH=$(grep -rh "hardware-configuration" "$FLAKE_DIR" 2>/dev/null | head -1)
-        
-        # Check common locations
+        # Determine where to place it based on directory structure
         if [[ -d "$FLAKE_DIR/hosts/$FLAKE_HOSTNAME" ]]; then
-          # Host-specific directory exists, put it there
           HWCONF_DEST="$FLAKE_DIR/hosts/$FLAKE_HOSTNAME/hardware-configuration.nix"
           log "Placing hardware config in hosts/$FLAKE_HOSTNAME/"
+        elif [[ -d "$FLAKE_DIR/hosts/default" ]]; then
+          # Starter config pattern - use default host
+          HWCONF_DEST="$FLAKE_DIR/hosts/default/hardware-configuration.nix"
+          log "Placing hardware config in hosts/default/"
         elif [[ -d "$FLAKE_DIR/hosts" ]]; then
-          # Has hosts dir but not this hostname - create it
           mkdir -p "$FLAKE_DIR/hosts/$FLAKE_HOSTNAME"
           HWCONF_DEST="$FLAKE_DIR/hosts/$FLAKE_HOSTNAME/hardware-configuration.nix"
           log "Creating hosts/$FLAKE_HOSTNAME/ for hardware config"
         else
-          # Put at root level
           HWCONF_DEST="$FLAKE_DIR/hardware-configuration.nix"
           log "Placing hardware config at root level"
         fi
@@ -336,19 +587,12 @@ CONF
         cp "$HWCONF_SRC" "$HWCONF_DEST"
         
       else
-        log "Config does not import hardware-configuration.nix"
-        log "This may be intentional (e.g., WSL configs)"
-        
-        # Check if this looks like a WSL config
+        # Config doesn't import hardware-configuration.nix
         if grep -rq "wsl.enable\|nixos-wsl" "$FLAKE_DIR" 2>/dev/null; then
           log "Detected WSL configuration - hardware config not needed"
         else
-          # Non-WSL config without hardware import - warn but continue
           log "WARNING: Config doesn't import hardware-configuration.nix"
           log "         This may cause boot issues on real hardware"
-          log "         Consider adding: ./hardware-configuration.nix to your modules"
-          
-          # Still copy it in case they want to add it manually
           cp "$HWCONF_SRC" "$FLAKE_DIR/hardware-configuration.nix"
           log "Hardware config copied to $FLAKE_DIR/ for reference"
         fi
@@ -362,11 +606,22 @@ CONF
     log "Starting nixos-install (this may take a while)..."
     log "You can follow progress in another tty (Alt+F2)"
     
+    # Determine which hostname to use for the flake
+    # If we created a wrapper, use $HOSTNAME; otherwise use $FLAKE_HOSTNAME
+    if [[ "$FLAKE_TYPE" == "url" && "''${URL_NEEDS_WRAPPER:-false}" == "true" ]]; then
+      INSTALL_HOSTNAME="$HOSTNAME"
+    elif [[ "$FLAKE_TYPE" == "starter" ]]; then
+      # Starter config uses 'default' as the configuration name
+      INSTALL_HOSTNAME="default"
+    else
+      INSTALL_HOSTNAME="$FLAKE_HOSTNAME"
+    fi
+    
     # Build the flake if present, otherwise use traditional install
     if [[ -f "$FLAKE_DIR/flake.nix" ]]; then
-      log "Installing from flake: $FLAKE_DIR#$FLAKE_HOSTNAME"
+      log "Installing from flake: $FLAKE_DIR#$INSTALL_HOSTNAME"
       nixos-install --root /mnt \
-        --flake "$FLAKE_DIR#$FLAKE_HOSTNAME" \
+        --flake "$FLAKE_DIR#$INSTALL_HOSTNAME" \
         --no-root-passwd \
         --no-channel-copy \
         2>&1 | tee -a "$LOG"
@@ -400,6 +655,69 @@ CONF
     # Copy install log to new system
     cp "$LOG" /mnt/var/log/nixos-easy-install.log 2>/dev/null || true
     
+    # Create helper script for config graduation (starter config only)
+    if [[ "$FLAKE_TYPE" == "starter" ]]; then
+      mkdir -p /mnt/usr/local/bin
+      cat > /mnt/usr/local/bin/nixos-config-publish << 'SCRIPT'
+#!/usr/bin/env bash
+# Publish your NixOS configuration to a git repository
+# Usage: nixos-config-publish <github-repo-url>
+#   e.g: nixos-config-publish git@github.com:username/my-nixos-config.git
+
+set -euo pipefail
+
+CONFIG_DIR="/etc/nixos"
+
+if [[ ! -d "$CONFIG_DIR/.git" ]]; then
+  echo "Error: $CONFIG_DIR is not a git repository"
+  exit 1
+fi
+
+if [[ $# -lt 1 ]]; then
+  echo "Usage: nixos-config-publish <github-repo-url>"
+  echo ""
+  echo "This will:"
+  echo "  1. Add the URL as 'origin' remote"
+  echo "  2. Push your configuration"
+  echo ""
+  echo "First, create an empty repository on GitHub, then run:"
+  echo "  nixos-config-publish git@github.com:YOUR_USERNAME/YOUR_REPO.git"
+  exit 1
+fi
+
+REPO_URL="$1"
+
+cd "$CONFIG_DIR"
+
+# Check if origin already exists
+if git remote get-url origin &>/dev/null; then
+  echo "Remote 'origin' already exists: $(git remote get-url origin)"
+  read -p "Replace with $REPO_URL? [y/N] " -n 1 -r
+  echo
+  if [[ $REPLY =~ ^[Yy]$ ]]; then
+    git remote set-url origin "$REPO_URL"
+  else
+    exit 1
+  fi
+else
+  git remote add origin "$REPO_URL"
+fi
+
+echo "Pushing to $REPO_URL..."
+git push -u origin main || git push -u origin master
+
+echo ""
+echo "✓ Configuration published!"
+echo ""
+echo "Your config is now at: $REPO_URL"
+echo ""
+echo "To install on another machine, use:"
+echo "  NixOS Easy Install → Custom URL → $REPO_URL"
+SCRIPT
+      chmod +x /mnt/usr/local/bin/nixos-config-publish
+      log "Created /usr/local/bin/nixos-config-publish helper script"
+    fi
+    
     # ============================================================
     # Success!
     # ============================================================
@@ -415,6 +733,11 @@ CONF
     log "║   Username: $USERNAME"
     log "║   Hostname: $HOSTNAME"
     log "║                                                            ║"
+    if [[ "$FLAKE_TYPE" == "starter" ]]; then
+      log "║   To backup your config to GitHub:                         ║"
+      log "║   nixos-config-publish <your-repo-url>                     ║"
+      log "║                                                            ║"
+    fi
     log "╚════════════════════════════════════════════════════════════╝"
     log ""
     
