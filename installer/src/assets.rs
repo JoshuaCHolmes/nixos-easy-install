@@ -228,11 +228,13 @@ fn download_file(url: &str, dir: &Path, filename: &str) -> Result<PathBuf> {
     download_file_with_checksum(url, dir, filename, None)
 }
 
-/// Installer boot assets (kernel + initrd)
+/// Installer boot assets (kernel + initrd + init path)
 #[derive(Debug)]
 pub struct InstallerAssets {
     pub kernel: PathBuf,
     pub initrd: PathBuf,
+    /// Path to the NixOS init (read from init-path file)
+    pub init_path: Option<String>,
 }
 
 /// GitHub release URL for installer boot assets
@@ -246,13 +248,17 @@ pub fn download_installer_assets(cache_dir: &Path, arch: &str) -> Result<Install
     
     fs::create_dir_all(cache_dir)?;
     
-    let assets = InstallerAssets {
+    let init_path_file = cache_dir.join("init-path");
+    let mut assets = InstallerAssets {
         kernel: cache_dir.join("bzImage"),
         initrd: cache_dir.join("initrd"),
+        init_path: None,
     };
     
     // Check cache
-    if assets.kernel.exists() && assets.initrd.exists() {
+    if assets.kernel.exists() && assets.initrd.exists() && init_path_file.exists() {
+        // Read cached init path
+        assets.init_path = fs::read_to_string(&init_path_file).ok().map(|s| s.trim().to_string());
         info!("Using cached installer boot files");
         return Ok(assets);
     }
@@ -294,6 +300,15 @@ pub fn download_installer_assets(cache_dir: &Path, arch: &str) -> Result<Install
     }
     if !assets.initrd.exists() {
         bail!("Failed to extract initrd");
+    }
+    
+    // Read init path if available
+    let init_path_file = cache_dir.join("init-path");
+    if init_path_file.exists() {
+        assets.init_path = fs::read_to_string(&init_path_file).ok().map(|s| s.trim().to_string());
+        info!("Init path: {:?}", assets.init_path);
+    } else {
+        warn!("No init-path file found - kernel may fail to boot without init= parameter");
     }
     
     info!("Installer boot files ready");
@@ -348,12 +363,12 @@ fn extract_tarball(tarball_path: &Path, output_dir: &Path, arch: &str) -> Result
         let path = entry.path()?;
         let path_str = path.to_string_lossy();
         
-        // Looking for arch/bzImage and arch/initrd
+        // Looking for arch/bzImage, arch/initrd, and arch/init-path
         let filename = path.file_name()
             .map(|n| n.to_string_lossy().to_string());
         
         if let Some(name) = filename {
-            if path_str.contains(arch) && (name == "bzImage" || name == "initrd") {
+            if path_str.contains(arch) && (name == "bzImage" || name == "initrd" || name == "init-path") {
                 let dest = output_dir.join(&name);
                 debug!("Extracting {} -> {:?}", path_str, dest);
                 entry.unpack(&dest)?;
@@ -507,13 +522,23 @@ fn decompress_gzip(data: &[u8]) -> Result<Vec<u8>> {
 /// This config is used for initial boot into the NixOS installer.
 /// The kernel and initrd are loaded from ESP (where GRUB is), and the
 /// loopback image is passed as a parameter for the installer to mount.
-pub fn generate_grub_config(nixos_root: &str, install_type: &str) -> String {
+/// 
+/// `init_path` is the path to the NixOS init binary (e.g., /nix/store/...-nixos-.../init)
+pub fn generate_grub_config(nixos_root: &str, install_type: &str, init_path: Option<&str>) -> String {
+    // Build kernel parameters
+    let mut params = Vec::new();
+    
+    // init= is required for NixOS to boot
+    if let Some(init) = init_path {
+        params.push(format!("init={}", init));
+    }
+    
     // For loopback install, we pass the disk location as kernel parameter
-    let kernel_params = if install_type == "loopback" || install_type == "quick" {
-        format!("nixos.loopback={}/root.disk", nixos_root.replace("\\", "/"))
-    } else {
-        "".to_string()
-    };
+    if install_type == "loopback" || install_type == "quick" {
+        params.push(format!("nixos.loopback={}/root.disk", nixos_root.replace("\\", "/")));
+    }
+    
+    let kernel_params = params.join(" ");
 
     // GRUB commands: linuxefi/initrdefi are x86_64-only (for certain Secure Boot setups)
     // ARM64 GRUB doesn't have these commands - must use linux/initrd
@@ -601,17 +626,24 @@ mod tests {
     
     #[test]
     fn test_grub_config_generation() {
-        let config = generate_grub_config("/NixOS", "loopback");
+        let config = generate_grub_config("/NixOS", "loopback", Some("/nix/store/test-init"));
         assert!(config.contains("NixOS Installer"));
         assert!(config.contains("nixos.loopback=/NixOS/root.disk"));
+        assert!(config.contains("init=/nix/store/test-init"));
         assert!(config.contains("/EFI/NixOS/bzImage"));
         assert!(config.contains("Windows Boot Manager"));
     }
     
     #[test]
     fn test_grub_config_partition() {
-        let config = generate_grub_config("/", "partition");
+        let config = generate_grub_config("/", "partition", None);
         // Partition install doesn't have loopback parameter
         assert!(!config.contains("nixos.loopback"));
+    }
+    
+    #[test]
+    fn test_grub_config_with_init() {
+        let config = generate_grub_config("/", "partition", Some("/nix/store/abc-nixos/init"));
+        assert!(config.contains("init=/nix/store/abc-nixos/init"));
     }
 }

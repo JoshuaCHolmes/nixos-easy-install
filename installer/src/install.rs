@@ -388,7 +388,11 @@ async fn download_boot_assets(config: &InstallConfig) -> Result<BootFiles> {
         "/".to_string()
     };
     
-    let grub_cfg_content = crate::assets::generate_grub_config(&nixos_root, install_type);
+    let grub_cfg_content = crate::assets::generate_grub_config(
+        &nixos_root, 
+        install_type,
+        installer_assets.init_path.as_deref()
+    );
     let grub_cfg_path = cache_dir.join("grub.cfg");
     std::fs::write(&grub_cfg_path, grub_cfg_content)?;
     

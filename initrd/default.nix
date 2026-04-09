@@ -1360,8 +1360,13 @@ in {
     cp ${nixosSystem.config.system.build.kernel}/*Image $out/bzImage 2>/dev/null || \
       cp ${nixosSystem.config.system.build.kernel}/bzImage $out/bzImage
     cp ${nixosSystem.config.system.build.initialRamdisk}/initrd $out/initrd
+    
+    # Export the init path - required for booting NixOS
+    # This is the path to stage-2 init in the toplevel closure
+    echo "${nixosSystem.config.system.build.toplevel}/init" > $out/init-path
+    
     cd $out
-    sha256sum bzImage initrd > SHA256SUMS
+    sha256sum bzImage initrd init-path > SHA256SUMS
   '';
   
   # Default is the toplevel for backwards compatibility
