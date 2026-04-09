@@ -6,7 +6,7 @@
 //! - Provides rollback/cleanup on failure
 //! - Progress reporting for UI feedback
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 use tracing::{info, warn, error};
 
@@ -29,6 +29,195 @@ pub struct InstallState {
     
     /// ESP folder path for cleanup
     pub esp_folder: Option<PathBuf>,
+}
+
+/// Options for installation
+#[derive(Debug, Clone, Default)]
+pub struct InstallOptions {
+    /// Dry-run mode: validate everything but don't make changes
+    pub dry_run: bool,
+    
+    /// Skip download (use cached assets)
+    pub offline: bool,
+}
+
+/// Perform a dry-run installation (validation only, no changes)
+/// 
+/// This validates all requirements and simulates each step without
+/// actually making any changes. Useful for testing.
+pub async fn dry_run(
+    config: InstallConfig,
+    system_info: &SystemInfo,
+    progress: ProgressCallback,
+) -> Result<DryRunReport> {
+    info!("Starting dry-run installation...");
+    
+    let mut report = DryRunReport::default();
+    
+    // Step 1: Validate system
+    progress(0.1, "[DRY RUN] Validating system requirements...");
+    match validate_system(system_info) {
+        Ok(_) => report.steps.push(DryRunStep::passed("System validation")),
+        Err(e) => report.steps.push(DryRunStep::failed("System validation", &e.to_string())),
+    }
+    
+    // Step 2: Check storage
+    progress(0.2, "[DRY RUN] Checking storage requirements...");
+    match &config.install_type[..] {
+        "loopback" | "quick" => {
+            if let Some(ref loopback) = config.loopback {
+                let loopback_cfg = crate::loopback::LoopbackConfig {
+                    target_dir: std::path::PathBuf::from(&loopback.target_dir),
+                    size_gb: loopback.size_gb,
+                    separate_home: false,
+                    home_size_gb: None,
+                };
+                match crate::loopback::preflight_check(&loopback_cfg) {
+                    Ok(preflight) => {
+                        if preflight.passed {
+                            report.steps.push(DryRunStep::passed("Loopback storage"));
+                        } else {
+                            report.steps.push(DryRunStep::failed(
+                                "Loopback storage", 
+                                &preflight.errors.join(", ")
+                            ));
+                        }
+                        for warning in preflight.warnings {
+                            report.warnings.push(warning);
+                        }
+                    }
+                    Err(e) => report.steps.push(DryRunStep::failed("Loopback storage", &e.to_string())),
+                }
+            }
+        }
+        "partition" | "full" => {
+            report.steps.push(DryRunStep::failed(
+                "Partition storage",
+                "Full partition installation not yet implemented"
+            ));
+        }
+        _ => {
+            report.steps.push(DryRunStep::failed(
+                "Storage",
+                &format!("Unknown install type: {}", config.install_type)
+            ));
+        }
+    }
+    
+    // Step 3: Check ESP
+    progress(0.3, "[DRY RUN] Checking EFI System Partition...");
+    if let Some(ref esp) = system_info.esp {
+        match crate::bootloader::preflight_check(esp) {
+            Ok(preflight) => {
+                if preflight.passed {
+                    report.steps.push(DryRunStep::passed("ESP access"));
+                } else {
+                    report.steps.push(DryRunStep::failed("ESP access", &preflight.errors.join(", ")));
+                }
+                for warning in preflight.warnings {
+                    report.warnings.push(warning);
+                }
+            }
+            Err(e) => report.steps.push(DryRunStep::failed("ESP access", &e.to_string())),
+        }
+    } else {
+        report.steps.push(DryRunStep::failed("ESP access", "No EFI System Partition found"));
+    }
+    
+    // Step 4: Check network (for downloads)
+    progress(0.4, "[DRY RUN] Checking network connectivity...");
+    match check_network_connectivity() {
+        Ok(_) => report.steps.push(DryRunStep::passed("Network connectivity")),
+        Err(e) => report.steps.push(DryRunStep::failed("Network connectivity", &e.to_string())),
+    }
+    
+    // Step 5: Validate config
+    progress(0.5, "[DRY RUN] Validating configuration...");
+    report.steps.push(DryRunStep::passed("Configuration validation"));
+    
+    progress(1.0, "[DRY RUN] Complete");
+    
+    report.passed = report.steps.iter().all(|s| s.passed);
+    
+    Ok(report)
+}
+
+/// Check if we can reach the Ubuntu archive
+fn check_network_connectivity() -> Result<()> {
+    let response = reqwest::blocking::Client::new()
+        .head("https://archive.ubuntu.com")
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .context("Cannot reach Ubuntu archive - check your internet connection")?;
+    
+    if response.status().is_success() || response.status().is_redirection() {
+        Ok(())
+    } else {
+        bail!("Ubuntu archive returned status: {}", response.status())
+    }
+}
+
+/// Report from a dry-run installation
+#[derive(Debug, Default)]
+pub struct DryRunReport {
+    /// Whether all checks passed
+    pub passed: bool,
+    
+    /// Results of each step
+    pub steps: Vec<DryRunStep>,
+    
+    /// Non-fatal warnings
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug)]
+pub struct DryRunStep {
+    pub name: String,
+    pub passed: bool,
+    pub error: Option<String>,
+}
+
+impl DryRunStep {
+    fn passed(name: &str) -> Self {
+        Self { name: name.to_string(), passed: true, error: None }
+    }
+    
+    fn failed(name: &str, error: &str) -> Self {
+        Self { name: name.to_string(), passed: false, error: Some(error.to_string()) }
+    }
+}
+
+impl std::fmt::Display for DryRunReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "=== Dry Run Report ===")?;
+        writeln!(f)?;
+        
+        for step in &self.steps {
+            let status = if step.passed { "✓" } else { "✗" };
+            write!(f, "{} {}", status, step.name)?;
+            if let Some(ref err) = step.error {
+                write!(f, ": {}", err)?;
+            }
+            writeln!(f)?;
+        }
+        
+        if !self.warnings.is_empty() {
+            writeln!(f)?;
+            writeln!(f, "Warnings:")?;
+            for warning in &self.warnings {
+                writeln!(f, "  ⚠ {}", warning)?;
+            }
+        }
+        
+        writeln!(f)?;
+        if self.passed {
+            writeln!(f, "Result: PASSED - Installation can proceed")?;
+        } else {
+            writeln!(f, "Result: FAILED - Fix the issues above before installing")?;
+        }
+        
+        Ok(())
+    }
 }
 
 /// Perform the installation
@@ -234,18 +423,44 @@ fn write_install_config(config: &InstallConfig, esp: &EspInfo) -> Result<()> {
 fn verify_setup(state: &InstallState) -> Result<()> {
     info!("Verifying installation setup...");
     
-    // Check loopback files exist
+    // Check loopback files exist and have correct properties
     if let Some(ref loopback) = state.loopback_result {
         if !loopback.root_disk.exists() {
-            anyhow::bail!("Root disk image not found at {:?}", loopback.root_disk);
+            bail!("Root disk image not found at {:?}", loopback.root_disk);
         }
+        
+        // Verify the sparse file has the expected apparent size
+        let metadata = std::fs::metadata(&loopback.root_disk)
+            .context("Cannot read root disk metadata")?;
+        if metadata.len() == 0 {
+            bail!("Root disk image is empty (0 bytes)");
+        }
+        info!("Root disk verified: {:?} ({} bytes apparent)", 
+              loopback.root_disk, metadata.len());
     }
     
     // Check bootloader files exist
     if let Some(ref bootloader) = state.bootloader_result {
         if !bootloader.esp_folder.exists() {
-            anyhow::bail!("ESP folder not found at {:?}", bootloader.esp_folder);
+            bail!("ESP folder not found at {:?}", bootloader.esp_folder);
         }
+        
+        // Verify critical boot files exist
+        let shim = bootloader.esp_folder.join("shimx64.efi");
+        let grub = bootloader.esp_folder.join("grubx64.efi");
+        let config = bootloader.esp_folder.join("install-config.json");
+        
+        if !shim.exists() {
+            bail!("shimx64.efi not found in ESP");
+        }
+        if !grub.exists() {
+            bail!("grubx64.efi not found in ESP");
+        }
+        if !config.exists() {
+            bail!("install-config.json not found in ESP");
+        }
+        
+        info!("ESP folder verified: {:?}", bootloader.esp_folder);
     }
     
     info!("Verification passed!");

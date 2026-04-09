@@ -157,6 +157,14 @@ pub fn setup_bootloader(
         display_name,
     )?;
     
+    // Verify the boot entry was actually created
+    if !verify_boot_entry(&boot_entry_id)? {
+        // Try to clean up the files we copied
+        warn!("Boot entry creation could not be verified, cleaning up...");
+        let _ = fs::remove_dir_all(&nixos_folder);
+        bail!("Boot entry creation failed - entry {} not found in bcdedit output", boot_entry_id);
+    }
+    
     info!("Bootloader setup complete. Entry ID: {}", boot_entry_id);
     
     Ok(BootloaderSetupResult {
@@ -164,6 +172,19 @@ pub fn setup_bootloader(
         boot_entry_id,
         secure_boot_ready: true,
     })
+}
+
+/// Verify that a boot entry exists in bcdedit
+fn verify_boot_entry(entry_id: &str) -> Result<bool> {
+    use std::process::Command;
+    
+    let output = Command::new("bcdedit")
+        .args(["/enum", "all"])
+        .output()
+        .context("Failed to run bcdedit /enum")?;
+    
+    let output_str = String::from_utf8_lossy(&output.stdout);
+    Ok(output_str.contains(entry_id))
 }
 
 /// Create UEFI boot entry using bcdedit

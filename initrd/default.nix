@@ -93,15 +93,60 @@ let
       TARGET_DIR=$(echo "$CONFIG" | jq -r '.loopback.target_dir')
       SIZE_GB=$(echo "$CONFIG" | jq -r '.loopback.size_gb')
       
-      # Find and mount Windows NTFS partition
-      log "Looking for Windows partition..."
-      WINDOWS_PART=$(lsblk -rno NAME,FSTYPE | grep -E 'ntfs|ntfs3' | head -1 | cut -d' ' -f1)
+      # Extract drive letter from target_dir (e.g., "C" from "C:\NixOS")
+      TARGET_DRIVE=$(echo "$TARGET_DIR" | head -c 1 | tr '[:lower:]' '[:upper:]')
+      log "Target drive letter: $TARGET_DRIVE"
+      
+      # Find the correct Windows NTFS partition
+      # We need to find the partition that matches the drive letter from Windows
+      # This is tricky because Linux doesn't know Windows drive letters directly
+      # Strategy: Look for NTFS partitions and find one containing our NixOS folder
+      
+      log "Looking for Windows partitions..."
+      WINDOWS_PART=""
+      
+      # List all NTFS partitions
+      NTFS_PARTS=$(lsblk -rno NAME,FSTYPE | grep -E 'ntfs|ntfs3' | cut -d' ' -f1)
+      
+      if [[ -z "$NTFS_PARTS" ]]; then
+        fail "No NTFS partitions found"
+      fi
+      
+      log "Found NTFS partitions: $NTFS_PARTS"
+      
+      # Try each NTFS partition to find the one with our NixOS directory
+      for PART in $NTFS_PARTS; do
+        log "Checking /dev/$PART..."
+        mkdir -p /mnt/check
+        
+        if mount -t ntfs3 -o ro "/dev/$PART" /mnt/check 2>/dev/null; then
+          # Convert target path for checking
+          CHECK_PATH="/mnt/check/$(echo "$TARGET_DIR" | sed 's|^[A-Za-z]:\\||; s|\\|/|g')"
+          
+          if [[ -d "$CHECK_PATH" ]]; then
+            log "Found NixOS directory on /dev/$PART"
+            WINDOWS_PART="$PART"
+            umount /mnt/check
+            break
+          fi
+          umount /mnt/check
+        fi
+      done
+      
+      # If we didn't find it by directory, fall back to largest NTFS partition
+      # (usually the main Windows partition)
       if [[ -z "$WINDOWS_PART" ]]; then
-        fail "Could not find Windows NTFS partition"
+        log "NixOS directory not found, using largest NTFS partition..."
+        WINDOWS_PART=$(lsblk -rno NAME,FSTYPE,SIZE | grep -E 'ntfs|ntfs3' | sort -t' ' -k3 -h | tail -1 | cut -d' ' -f1)
+        log "Selected partition: $WINDOWS_PART"
+      fi
+      
+      if [[ -z "$WINDOWS_PART" ]]; then
+        fail "Could not find suitable Windows NTFS partition"
       fi
       
       mkdir -p /mnt/windows
-      mount -t ntfs3 "/dev/$WINDOWS_PART" /mnt/windows || fail "Could not mount Windows partition"
+      mount -t ntfs3 "/dev/$WINDOWS_PART" /mnt/windows || fail "Could not mount Windows partition /dev/$WINDOWS_PART"
       log "Windows partition mounted: /dev/$WINDOWS_PART"
       
       # Derive NixOS directory from target_dir (convert Windows path)

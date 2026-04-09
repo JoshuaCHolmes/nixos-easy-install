@@ -1,6 +1,84 @@
 //! Installation configuration types
 
 use serde::{Deserialize, Serialize};
+use anyhow::{Result, bail};
+
+/// Validate a hostname (RFC 1123)
+/// - Only alphanumeric and hyphens
+/// - Cannot start/end with hyphen
+/// - Max 63 characters
+pub fn validate_hostname(hostname: &str) -> Result<()> {
+    if hostname.is_empty() {
+        bail!("Hostname cannot be empty");
+    }
+    if hostname.len() > 63 {
+        bail!("Hostname too long (max 63 characters)");
+    }
+    if hostname.starts_with('-') || hostname.ends_with('-') {
+        bail!("Hostname cannot start or end with a hyphen");
+    }
+    if !hostname.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        bail!("Hostname can only contain letters, numbers, and hyphens");
+    }
+    Ok(())
+}
+
+/// Validate a username
+/// - Only lowercase alphanumeric and underscores
+/// - Must start with letter
+/// - Max 32 characters
+pub fn validate_username(username: &str) -> Result<()> {
+    if username.is_empty() {
+        bail!("Username cannot be empty");
+    }
+    if username.len() > 32 {
+        bail!("Username too long (max 32 characters)");
+    }
+    if !username.chars().next().unwrap().is_ascii_lowercase() {
+        bail!("Username must start with a lowercase letter");
+    }
+    if !username.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') {
+        bail!("Username can only contain lowercase letters, numbers, and underscores");
+    }
+    // Prevent system usernames
+    let reserved = ["root", "daemon", "bin", "sys", "sync", "games", "man", "lp", 
+                    "mail", "news", "uucp", "proxy", "www-data", "backup", "list",
+                    "irc", "gnats", "nobody", "systemd", "messagebus", "sshd", "nix"];
+    if reserved.contains(&username) {
+        bail!("'{}' is a reserved system username", username);
+    }
+    Ok(())
+}
+
+/// Validate a password
+/// - At least 8 characters (or empty for no password, which we should warn about)
+pub fn validate_password(password: &str) -> Result<()> {
+    if password.is_empty() {
+        // We'll allow this but the UI should warn
+        return Ok(());
+    }
+    if password.len() < 8 {
+        bail!("Password must be at least 8 characters");
+    }
+    Ok(())
+}
+
+/// Validate a Git URL
+pub fn validate_git_url(url: &str) -> Result<()> {
+    if url.is_empty() {
+        bail!("Git URL cannot be empty");
+    }
+    // Must be a valid Git URL pattern
+    if !(url.starts_with("https://") || url.starts_with("git@") || url.starts_with("ssh://")) {
+        bail!("Git URL must start with https://, git@, or ssh://");
+    }
+    // Basic pattern matching for common Git hosts
+    if url.starts_with("https://") && !url.contains("github.com") && !url.contains("gitlab.com") 
+       && !url.contains("codeberg.org") && !url.contains("sr.ht") {
+        // Allow but don't error - could be a self-hosted instance
+    }
+    Ok(())
+}
 
 /// The configuration that gets written to install-config.json
 /// and read by the NixOS installer initrd
@@ -56,6 +134,7 @@ pub struct InstallOptions {
 }
 
 impl InstallConfig {
+    /// Create a new loopback install config with validation
     pub fn new_loopback(
         hostname: String,
         username: String,
@@ -63,8 +142,21 @@ impl InstallConfig {
         flake_type: &str,
         flake_url: Option<String>,
         size_gb: u32,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        // Validate inputs
+        validate_hostname(&hostname)?;
+        validate_username(&username)?;
+        if let Some(ref url) = flake_url {
+            validate_git_url(url)?;
+        }
+        if size_gb < 10 {
+            bail!("Disk size must be at least 10GB");
+        }
+        if size_gb > 2000 {
+            bail!("Disk size cannot exceed 2TB");
+        }
+        
+        Ok(Self {
             version: 1,
             install_type: "loopback".to_string(),
             hostname: hostname.clone(),
@@ -84,9 +176,10 @@ impl InstallConfig {
                 encrypt: false,
                 secure_boot: true,
             },
-        }
+        })
     }
     
+    /// Create a new partition install config with validation
     pub fn new_partition(
         hostname: String,
         username: String,
@@ -97,8 +190,15 @@ impl InstallConfig {
         boot_partition: String,
         swap_partition: Option<String>,
         encrypt: bool,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        // Validate inputs
+        validate_hostname(&hostname)?;
+        validate_username(&username)?;
+        if let Some(ref url) = flake_url {
+            validate_git_url(url)?;
+        }
+        
+        Ok(Self {
             version: 1,
             install_type: "partition".to_string(),
             hostname: hostname.clone(),
@@ -119,7 +219,7 @@ impl InstallConfig {
                 encrypt,
                 secure_boot: true,
             },
-        }
+        })
     }
     
     /// Serialize to JSON for writing to install-config.json
