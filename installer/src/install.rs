@@ -490,7 +490,7 @@ async fn download_boot_assets(config: &InstallConfig) -> Result<BootFiles> {
     let nixos_root = if install_type == "loopback" || install_type == "quick" {
         config.loopback.as_ref()
             .map(|l| l.target_dir.clone())
-            .unwrap_or_else(|| "C:\\NixOS".to_string())
+            .ok_or_else(|| anyhow::anyhow!("Loopback config missing for loopback install type"))?
     } else {
         "/".to_string()
     };

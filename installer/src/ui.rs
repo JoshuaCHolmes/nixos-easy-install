@@ -1288,10 +1288,17 @@ impl InstallerApp {
                                         let id = &line[start..=end];
                                         // Check if this is a NixOS entry by looking at subsequent lines
                                         if stdout.contains("NixOS") && stdout.contains(id) {
-                                            let _ = Command::new("bcdedit")
+                                            match Command::new("bcdedit")
                                                 .args(["/delete", id])
-                                                .output();
-                                            self.cleanup_results.push(format!("Removed boot entry {}", id));
+                                                .output() 
+                                            {
+                                                Ok(_) => {
+                                                    self.cleanup_results.push(format!("Removed boot entry {}", id));
+                                                }
+                                                Err(e) => {
+                                                    self.cleanup_results.push(format!("Failed to remove boot entry {}: {}", id, e));
+                                                }
+                                            }
                                         }
                                     }
                                 }

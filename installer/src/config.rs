@@ -34,8 +34,11 @@ pub fn validate_username(username: &str) -> Result<()> {
     if username.len() > 32 {
         bail!("Username too long (max 32 characters)");
     }
-    if !username.chars().next().unwrap().is_ascii_lowercase() {
-        bail!("Username must start with a lowercase letter");
+    // Safe: we already checked username is not empty above
+    if let Some(first_char) = username.chars().next() {
+        if !first_char.is_ascii_lowercase() {
+            bail!("Username must start with a lowercase letter");
+        }
     }
     if !username.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') {
         bail!("Username can only contain lowercase letters, numbers, and underscores");
