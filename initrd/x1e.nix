@@ -245,7 +245,8 @@ in {
     echo "${nixosSystem.config.system.build.toplevel}/init" > $out/init-path
     
     # Export device info for the Windows installer
-    echo "x1e" > $out/platform
+    # Must match the arch string expected by installer (assets.rs detect_platform)
+    echo "aarch64-x1e" > $out/platform
     echo "lenovo-yoga-slim7x" > $out/default-device
     
     cd $out

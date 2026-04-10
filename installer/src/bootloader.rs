@@ -192,7 +192,17 @@ pub fn setup_bootloader(
     }
     // Copy Device Tree Blob for ARM64 X1E (if provided)
     if let Some(dtb) = &boot_files.device_dtb {
-        copy_boot_file(dtb, &nixos_folder.join("device.dtb"), "Device Tree Blob")?;
+        let dtb_dest = nixos_folder.join("device.dtb");
+        copy_boot_file(dtb, &dtb_dest, "Device Tree Blob")?;
+        // Verify DTB was actually copied (critical for X1E boot)
+        if !dtb_dest.exists() {
+            bail!("Failed to copy Device Tree Blob to ESP - file not found after copy");
+        }
+        let dtb_size = std::fs::metadata(&dtb_dest)?.len();
+        if dtb_size == 0 {
+            bail!("Device Tree Blob copied to ESP is empty (0 bytes)");
+        }
+        info!("Device Tree Blob copied successfully ({} bytes)", dtb_size);
     }
     
     // Create UEFI boot entry
@@ -477,9 +487,9 @@ fn create_uefi_boot_entry_direct(esp: &EspInfo, efi_path: &Path, description: &s
     // Write Boot#### variable
     write_uefi_variable(&boot_var_name, EFI_GLOBAL_GUID, &load_option)?;
     
-    // Update BootOrder to include our new entry at the end
-    let mut new_boot_order = boot_order.clone();
-    new_boot_order.push(boot_num);
+    // Update BootOrder to include our new entry at the BEGINNING (so NixOS boots by default)
+    let mut new_boot_order = vec![boot_num];
+    new_boot_order.extend(boot_order.iter().cloned());
     if let Err(e) = write_boot_order(&new_boot_order) {
         // Rollback: delete the Boot#### we just created to avoid orphaned entry
         warn!("Failed to update BootOrder, rolling back Boot#### creation: {}", e);
@@ -489,7 +499,7 @@ fn create_uefi_boot_entry_direct(esp: &EspInfo, efi_path: &Path, description: &s
         return Err(e);
     }
     
-    info!("Successfully created UEFI boot entry {}", boot_var_name);
+    info!("Successfully created UEFI boot entry {} (now default boot option)", boot_var_name);
     
     Ok(boot_var_name)
 }

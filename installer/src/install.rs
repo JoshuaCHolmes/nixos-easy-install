@@ -8,7 +8,7 @@
 
 use anyhow::{Context, Result, bail};
 use std::path::PathBuf;
-use tracing::{info, warn, error};
+use tracing::{info, warn, error, debug};
 
 use crate::config::InstallConfig;
 use crate::system::{SystemInfo, EspInfo};
@@ -340,6 +340,16 @@ async fn install_inner(
     progress(0.90, "Verifying installation...");
     verify_setup(state)?;
     
+    // Clean up download cache on success
+    let cache_dir = std::env::temp_dir().join("nixos-install").join("boot-assets");
+    if cache_dir.exists() {
+        if let Err(e) = std::fs::remove_dir_all(&cache_dir) {
+            warn!("Could not clean up cache directory: {}", e);
+        } else {
+            debug!("Cleaned up cache directory: {:?}", cache_dir);
+        }
+    }
+    
     progress(1.0, "Ready to reboot!");
     
     Ok(())
@@ -596,6 +606,7 @@ fn verify_setup(state: &InstallState) -> Result<()> {
         
         // Verify critical boot files exist (architecture-specific names)
         let arch = crate::assets::detect_arch();
+        let platform = crate::assets::detect_platform();
         let (shim_name, grub_name) = if arch == "aarch64" {
             ("shimaa64.efi", "grubaa64.efi")
         } else {
@@ -614,6 +625,27 @@ fn verify_setup(state: &InstallState) -> Result<()> {
         }
         if !config.exists() {
             bail!("install-config.json not found in ESP");
+        }
+        
+        // Verify DTB exists for platforms that require it (X1E)
+        if platform.needs_custom_kernel() {
+            let dtb = bootloader.esp_folder.join("device.dtb");
+            if !dtb.exists() {
+                bail!(
+                    "Device Tree Blob (device.dtb) not found in ESP.\n\
+                    This is required for {} to boot. Installation cannot continue.",
+                    platform.display_name()
+                );
+            }
+            let dtb_size = std::fs::metadata(&dtb)?.len();
+            // DTBs are typically 50-300KB; anything under 10KB is likely corrupt
+            if dtb_size < 10_000 {
+                bail!(
+                    "Device Tree Blob appears invalid (only {} bytes). Expected > 10KB for valid DTB.",
+                    dtb_size
+                );
+            }
+            info!("Device Tree Blob verified ({} bytes)", dtb_size);
         }
         
         info!("ESP folder verified: {:?}", bootloader.esp_folder);

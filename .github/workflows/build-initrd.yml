@@ -139,7 +139,7 @@ jobs:
             cp -r "$arch_dir"/* release/
           done
           
-          # Create combined manifest
+          # Create combined manifest for files inside tarballs
           cd release
           for arch in x86_64 aarch64 aarch64-x1e; do
             if [[ -d $arch ]]; then
@@ -151,6 +151,8 @@ jobs:
           for arch in x86_64 aarch64 aarch64-x1e; do
             if [[ -d $arch ]]; then
               tar czf nixos-installer-$arch.tar.gz $arch/
+              # Add tarball checksum for download verification
+              sha256sum nixos-installer-$arch.tar.gz >> SHA256SUMS.txt
             fi
           done
           

@@ -497,12 +497,17 @@ pub fn download_installer_assets_for_platform(cache_dir: &Path, platform: Hardwa
         warn!("No init-path file found - kernel may fail to boot without init= parameter");
     }
     
-    // Check for DTB (X1E platform only)
+    // Check for DTB (X1E platform only - REQUIRED for boot)
     if dtb_file.exists() {
-        assets.device_dtb = Some(dtb_file);
+        assets.device_dtb = Some(dtb_file.clone());
         info!("Device Tree Blob found for hardware initialization");
     } else if platform.needs_custom_kernel() {
-        warn!("No device.dtb found for {} - display may not work!", platform.display_name());
+        bail!(
+            "Device Tree Blob (DTB) required for {} but not found.\n\
+            The DTB is essential for hardware initialization on this platform.\n\
+            Please ensure you're using the correct installer release for your hardware.",
+            platform.display_name()
+        );
     }
     
     // Store platform for cache validation
@@ -633,20 +638,37 @@ fn extract_tarball(tarball_path: &Path, output_dir: &Path, arch: &str) -> Result
     let decoder = flate2::read::GzDecoder::new(tarball);
     let mut archive = tar::Archive::new(decoder);
     
+    // Files to extract from tarball (arch-prefixed paths like "aarch64-x1e/bzImage")
+    let target_files = [
+        "bzImage", "initrd", "init-path", "device.dtb",
+        "platform", "default-device", "dtb-name", "SHA256SUMS"
+    ];
+    
     for entry in archive.entries()? {
         let mut entry = entry?;
         let path = entry.path()?;
         let path_str = path.to_string_lossy();
         
-        // Looking for arch/bzImage, arch/initrd, arch/init-path, and arch/device.dtb
+        // Security: Verify path is within expected arch directory (no path traversal)
+        if path_str.contains("..") {
+            warn!("Skipping suspicious path in tarball: {}", path_str);
+            continue;
+        }
+        
         let filename = path.file_name()
             .map(|n| n.to_string_lossy().to_string());
         
         if let Some(name) = filename {
-            if path_str.contains(arch) && (name == "bzImage" || name == "initrd" || name == "init-path" || name == "device.dtb") {
+            // Only extract files that are in the correct arch directory and are expected files
+            if path_str.contains(arch) && target_files.contains(&name.as_str()) {
                 let dest = output_dir.join(&name);
                 debug!("Extracting {} -> {:?}", path_str, dest);
                 entry.unpack(&dest)?;
+                
+                // Verify extraction succeeded
+                if !dest.exists() {
+                    warn!("Failed to extract {}: file not created", name);
+                }
             }
         }
     }
