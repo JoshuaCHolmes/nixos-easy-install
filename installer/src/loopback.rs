@@ -15,9 +15,10 @@ use std::path::{Path, PathBuf};
 use std::fs;
 use tracing::{info, warn, debug};
 
-/// Configuration for a loopback installation
+/// Runtime configuration for loopback installation (internal use)
+/// Note: This is different from config::LoopbackSetup which is serialized to JSON
 #[derive(Debug, Clone)]
-pub struct LoopbackConfig {
+pub struct LoopbackSetup {
     /// Directory to install to (e.g., C:\NixOS)
     pub target_dir: PathBuf,
     
@@ -51,7 +52,7 @@ pub struct LoopbackPrepareResult {
 /// Verify that loopback installation is possible
 /// 
 /// SAFETY: This function only reads, never writes.
-pub fn preflight_check(config: &LoopbackConfig) -> Result<PreflightResult> {
+pub fn preflight_check(config: &LoopbackSetup) -> Result<PreflightResult> {
     info!("Running loopback preflight checks...");
     
     let mut errors = Vec::new();
@@ -172,7 +173,7 @@ pub struct PreflightResult {
 /// - Creates new files only, never modifies existing
 /// - Uses sparse files (instant creation, no disk fill)
 /// - Entire operation reversible by deleting target_dir
-pub fn prepare_loopback(config: &LoopbackConfig) -> Result<LoopbackPrepareResult> {
+pub fn prepare_loopback(config: &LoopbackSetup) -> Result<LoopbackPrepareResult> {
     info!("Preparing loopback installation at {:?}", config.target_dir);
     
     // Final safety check
@@ -477,7 +478,7 @@ mod tests {
     
     #[test]
     fn test_preflight_checks_missing_parent() {
-        let config = LoopbackConfig {
+        let config = LoopbackSetup {
             target_dir: PathBuf::from("/nonexistent/path/nixos"),
             size_gb: 30,
             separate_home: false,
@@ -497,7 +498,7 @@ mod tests {
     
     #[test]
     fn test_preflight_checks_size_too_small() {
-        let config = LoopbackConfig {
+        let config = LoopbackSetup {
             target_dir: env::temp_dir().join("nixos_test"),
             size_gb: 5, // Too small
             separate_home: false,

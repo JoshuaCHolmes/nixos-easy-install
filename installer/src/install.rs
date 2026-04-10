@@ -12,7 +12,7 @@ use tracing::{info, warn, error, debug};
 
 use crate::config::InstallConfig;
 use crate::system::{SystemInfo, EspInfo};
-use crate::loopback::{LoopbackConfig, LoopbackPrepareResult};
+use crate::loopback::{LoopbackSetup, LoopbackPrepareResult};
 use crate::bootloader::{BootFiles, BootloaderSetupResult};
 
 /// Progress callback type
@@ -34,7 +34,7 @@ pub struct InstallState {
 /// Options for installation (reserved for future use)
 #[derive(Debug, Clone, Default)]
 #[allow(dead_code)]
-pub struct InstallOptions {
+pub struct InstallMode {
     /// Dry-run mode: validate everything but don't make changes
     pub dry_run: bool,
     
@@ -67,7 +67,7 @@ pub async fn dry_run(
     match &config.install_type[..] {
         "loopback" | "quick" => {
             if let Some(ref loopback) = config.loopback {
-                let loopback_cfg = crate::loopback::LoopbackConfig {
+                let loopback_cfg = crate::loopback::LoopbackSetup {
                     target_dir: std::path::PathBuf::from(&loopback.target_dir),
                     size_gb: loopback.size_gb,
                     separate_home: false,
@@ -277,7 +277,7 @@ async fn install_inner(
     // Validate loopback storage BEFORE we create files
     if config.install_type == "loopback" || config.install_type == "quick" {
         if let Some(ref loopback) = config.loopback {
-            let loopback_cfg = crate::loopback::LoopbackConfig {
+            let loopback_cfg = crate::loopback::LoopbackSetup {
                 target_dir: std::path::PathBuf::from(&loopback.target_dir),
                 size_gb: loopback.size_gb,
                 separate_home: false,
@@ -430,7 +430,7 @@ async fn prepare_loopback(
     
     progress(0.12, "Creating NixOS directory...");
     
-    let cfg = LoopbackConfig {
+    let cfg = LoopbackSetup {
         target_dir: PathBuf::from(&loopback_cfg.target_dir),
         size_gb: loopback_cfg.size_gb,
         separate_home: false,

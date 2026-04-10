@@ -271,7 +271,13 @@ impl InstallerApp {
         };
         
         // Run dry-run synchronously (it's quick)
-        let rt = tokio::runtime::Runtime::new().unwrap();
+        let rt = match tokio::runtime::Runtime::new() {
+            Ok(rt) => rt,
+            Err(e) => {
+                self.form_errors.push(format!("Failed to create runtime: {}", e));
+                return;
+            }
+        };
         let progress_callback: install::ProgressCallback = Box::new(|_, _| {});
         
         match rt.block_on(install::dry_run(config, &system_info, progress_callback)) {
@@ -334,7 +340,16 @@ impl InstallerApp {
         // Spawn installation thread
         thread::spawn(move || {
             // Create a runtime for async code
-            let rt = tokio::runtime::Runtime::new().unwrap();
+            let rt = match tokio::runtime::Runtime::new() {
+                Ok(rt) => rt,
+                Err(e) => {
+                    if let Ok(mut state) = progress_state.lock() {
+                        state.error = Some(format!("Failed to create runtime: {}", e));
+                        state.complete = true;
+                    }
+                    return;
+                }
+            };
             
             rt.block_on(async {
                 let progress_callback: install::ProgressCallback = Box::new({
@@ -869,6 +884,9 @@ impl InstallerApp {
         ui.horizontal(|ui| {
             if ui.button("← Back").clicked() {
                 self.step = InstallStep::UserSetup;
+                // Clear dry run status when going back - user may change config
+                self.dry_run_passed = false;
+                self.dry_run_warnings.clear();
             }
             
             ui.add_space(10.0);
@@ -948,7 +966,10 @@ impl InstallerApp {
                     self.step = InstallStep::Summary;
                     self.install_started = false;
                     self.error = None;
-                    *self.install_progress.lock().unwrap() = InstallProgress::default();
+                    // Reset progress state, handling potential poisoned mutex
+                    if let Ok(mut progress) = self.install_progress.lock() {
+                        *progress = InstallProgress::default();
+                    }
                 }
             }
         });
