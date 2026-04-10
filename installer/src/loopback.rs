@@ -181,22 +181,51 @@ pub fn prepare_loopback(config: &LoopbackConfig) -> Result<LoopbackPrepareResult
         bail!("Preflight checks failed: {:?}", preflight.errors);
     }
     
+    // Track what we've created for rollback on failure
+    #[allow(unused_assignments)]
+    let mut created_dir = false;
+    #[allow(unused_assignments)]
+    let mut created_root = false;
+    
+    // Rollback helper
+    let rollback = |dir: &Path, created_dir: bool, created_root: bool| {
+        if created_root {
+            let _ = fs::remove_file(dir.join("root.disk"));
+        }
+        if created_dir {
+            // Only remove if we created it and it's empty (or only has our files)
+            let _ = fs::remove_dir_all(dir);
+        }
+    };
+    
     // Create target directory
     info!("Creating directory: {:?}", config.target_dir);
-    fs::create_dir_all(&config.target_dir)
-        .context("Failed to create target directory")?;
+    if !config.target_dir.exists() {
+        fs::create_dir_all(&config.target_dir)
+            .context("Failed to create target directory")?;
+        created_dir = true;
+    }
     
     // Create root.disk as sparse file
     let root_disk = config.target_dir.join("root.disk");
     info!("Creating sparse root.disk ({}GB)", config.size_gb);
-    create_sparse_file(&root_disk, config.size_gb as u64 * 1024 * 1024 * 1024)?;
+    if let Err(e) = create_sparse_file(&root_disk, config.size_gb as u64 * 1024 * 1024 * 1024) {
+        rollback(&config.target_dir, created_dir, false);
+        return Err(e);
+    }
+    created_root = true;
     
     // Optionally create home.disk
     let home_disk = if config.separate_home {
         let home_size = config.home_size_gb.unwrap_or(config.size_gb);
         let path = config.target_dir.join("home.disk");
         info!("Creating sparse home.disk ({}GB)", home_size);
-        create_sparse_file(&path, home_size as u64 * 1024 * 1024 * 1024)?;
+        if let Err(e) = create_sparse_file(&path, home_size as u64 * 1024 * 1024 * 1024) {
+            // Rollback root.disk since home.disk failed
+            warn!("home.disk creation failed, rolling back...");
+            rollback(&config.target_dir, created_dir, created_root);
+            return Err(e);
+        }
         Some(path)
     } else {
         None
