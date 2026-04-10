@@ -207,6 +207,39 @@ EOF
     done
     
     # ============================================================
+    # Detect specific X1E device
+    # ============================================================
+    
+    log "Detecting Snapdragon X Elite device..."
+    
+    DEVICE_MODEL=""
+    X1E_HARDWARE_MODULE="lenovo-yoga-slim7x"  # Default
+    
+    # Read DMI product info
+    if [[ -f /sys/class/dmi/id/product_name ]]; then
+      PRODUCT_NAME=$(cat /sys/class/dmi/id/product_name 2>/dev/null || echo "")
+      log "Product: $PRODUCT_NAME"
+      
+      if echo "$PRODUCT_NAME" | grep -qi "yoga.*slim.*7x\|83ED"; then
+        DEVICE_MODEL="Lenovo Yoga Slim 7x"
+        X1E_HARDWARE_MODULE="lenovo-yoga-slim7x"
+      elif echo "$PRODUCT_NAME" | grep -qi "t14s.*gen.*6\|thinkpad.*t14s\|21NS"; then
+        DEVICE_MODEL="Lenovo ThinkPad T14s Gen 6"
+        X1E_HARDWARE_MODULE="thinkpad-t14s-gen6"
+      elif echo "$PRODUCT_NAME" | grep -qi "surface"; then
+        DEVICE_MODEL="Microsoft Surface"
+        X1E_HARDWARE_MODULE="lenovo-yoga-slim7x"  # Fallback, may need Surface-specific
+        log "WARNING: Surface device detected - using Yoga config as fallback"
+      else
+        DEVICE_MODEL="Generic Snapdragon X Elite"
+        log "WARNING: Unknown X1E device - using Yoga Slim 7x config as fallback"
+      fi
+    fi
+    
+    log "Detected device: $DEVICE_MODEL"
+    log "Using hardware module: hardware.$X1E_HARDWARE_MODULE.enable"
+    
+    # ============================================================
     # Setup flake configuration
     # ============================================================
     
@@ -218,12 +251,45 @@ EOF
       rm -rf "$FLAKE_DIR"
       git clone "$FLAKE_URL" "$FLAKE_DIR" || fail "Could not clone flake from $FLAKE_URL"
       
+      # Check if the config needs X1E module injection
+      if ! grep -rq "x1e-nixos-config\|x1e-nixos\|kuruczgy" "$FLAKE_DIR" 2>/dev/null; then
+        log "WARNING: Your config doesn't appear to include x1e-nixos-config"
+        log "         Snapdragon X Elite devices require this for proper hardware support"
+        log ""
+        log "Add to your flake.nix inputs:"
+        log '  x1e-nixos-config.url = "github:kuruczgy/x1e-nixos-config";'
+        log ""
+        log "And import the module in your nixosConfigurations:"
+        log "  x1e-nixos-config.nixosModules.x1e"
+        log ""
+        log "Then enable your device:"
+        log "  hardware.$X1E_HARDWARE_MODULE.enable = true;"
+        log ""
+      fi
+      
+      # Check if hardware-configuration.nix is expected
+      if grep -rq "hardware-configuration" "$FLAKE_DIR" 2>/dev/null; then
+        log "Config expects hardware-configuration.nix - will copy generated one"
+        HWCONF_SRC="/mnt/etc/nixos-generated/hardware-configuration.nix"
+        if [[ -f "$HWCONF_SRC" ]]; then
+          # Find where to put it (could be hosts/$HOSTNAME/, etc.)
+          if [[ -d "$FLAKE_DIR/hosts/$HOSTNAME" ]]; then
+            cp "$HWCONF_SRC" "$FLAKE_DIR/hosts/$HOSTNAME/hardware-configuration.nix"
+          elif [[ -d "$FLAKE_DIR/hosts/$FLAKE_HOSTNAME" ]]; then
+            cp "$HWCONF_SRC" "$FLAKE_DIR/hosts/$FLAKE_HOSTNAME/hardware-configuration.nix"
+          else
+            cp "$HWCONF_SRC" "$FLAKE_DIR/hardware-configuration.nix"
+          fi
+          log "Hardware configuration copied"
+        fi
+      fi
+      
     elif [[ "$FLAKE_TYPE" == "starter" || "$FLAKE_TYPE" == "minimal" ]]; then
-      log "Creating X1E starter configuration..."
+      log "Creating X1E $FLAKE_TYPE configuration..."
       
       cat > "$FLAKE_DIR/flake.nix" << EOF
 {
-  description = "NixOS configuration for Snapdragon X Elite";
+  description = "NixOS configuration for Snapdragon X Elite ($DEVICE_MODEL)";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -252,9 +318,8 @@ EOF
 {
   system.stateVersion = "24.11";
   
-  # Enable Lenovo Yoga Slim 7x hardware support
-  # Change this for other X1E devices (e.g., hardware.thinkpad-t14s-gen6.enable)
-  hardware.lenovo-yoga-slim7x.enable = true;
+  # Hardware support for $DEVICE_MODEL
+  hardware.$X1E_HARDWARE_MODULE.enable = true;
   
   # Network
   networking.hostName = "$HOSTNAME";
@@ -277,14 +342,77 @@ EOF
   
   # Enable sudo
   security.sudo.enable = true;
+  security.sudo.wheelNeedsPassword = false;  # Convenience for initial setup
   
   # Boot configuration for loopback install
   boot.loader.systemd-boot.enable = true;
   boot.loader.efi.canTouchEfiVariables = true;
+  
+  # SSH for remote access
+  services.openssh.enable = true;
 }
 EOF
 
-      log "Starter configuration created"
+      # Create README for the user
+      cat > "$FLAKE_DIR/README.md" << 'README'
+# NixOS Configuration
+
+This configuration was created by NixOS Easy Install for your Snapdragon X Elite device.
+
+## Quick Start
+
+After logging in, you can:
+
+1. **Edit your configuration**:
+   \`\`\`bash
+   sudo nano /etc/nixos/configuration.nix
+   \`\`\`
+
+2. **Rebuild your system** after making changes:
+   \`\`\`bash
+   sudo nixos-rebuild switch
+   \`\`\`
+
+3. **Publish your config to GitHub** (to reuse on other machines):
+   \`\`\`bash
+   nixos-config-publish git@github.com:YOUR_USERNAME/my-nixos-config.git
+   \`\`\`
+
+## Important Files
+
+- `flake.nix` - Flake definition with inputs (nixpkgs, x1e-nixos-config)
+- `configuration.nix` - Your system configuration (packages, users, services)
+- `hardware-configuration.nix` - Auto-generated hardware settings (don't edit manually)
+
+## Snapdragon X Elite Notes
+
+Your device uses [x1e-nixos-config](https://github.com/kuruczgy/x1e-nixos-config)
+for proper hardware support. This provides:
+
+- Custom kernel with Qualcomm patches
+- Display, WiFi, Bluetooth support
+- Power management optimizations
+
+Keep your flake inputs updated for the latest fixes:
+\`\`\`bash
+cd /etc/nixos
+nix flake update
+sudo nixos-rebuild switch
+\`\`\`
+
+## Need Help?
+
+- NixOS Manual: https://nixos.org/manual/nixos/stable/
+- NixOS Discourse: https://discourse.nixos.org/
+- X1E NixOS Config: https://github.com/kuruczgy/x1e-nixos-config
+README
+
+      # Initialize git repo for config tracking
+      git -C "$FLAKE_DIR" init
+      git -C "$FLAKE_DIR" add -A
+      git -C "$FLAKE_DIR" commit -m "Initial NixOS configuration for $HOSTNAME ($DEVICE_MODEL)"
+      
+      log "Starter configuration created with README"
     fi
     
     # ============================================================
@@ -318,7 +446,7 @@ EOF
     log "NixOS installation complete!"
     
     # ============================================================
-    # Post-install cleanup
+    # Post-install cleanup and helper scripts
     # ============================================================
     
     log "Performing post-install cleanup..."
@@ -327,26 +455,107 @@ EOF
     rm -f "$CONFIG_PATH"
     
     # Copy install log
+    mkdir -p /mnt/var/log
     cp "$LOG" /mnt/var/log/nixos-easy-install.log 2>/dev/null || true
+    
+    # Create helper script for config publishing (starter/minimal configs)
+    if [[ "$FLAKE_TYPE" == "starter" || "$FLAKE_TYPE" == "minimal" ]]; then
+      mkdir -p /mnt/usr/local/bin
+      cat > /mnt/usr/local/bin/nixos-config-publish << 'SCRIPT'
+#!/usr/bin/env bash
+# Publish your NixOS configuration to a git repository
+# Usage: nixos-config-publish <github-repo-url>
+
+set -euo pipefail
+
+CONFIG_DIR="/etc/nixos"
+
+if [[ ! -d "$CONFIG_DIR/.git" ]]; then
+  echo "Error: $CONFIG_DIR is not a git repository"
+  exit 1
+fi
+
+if [[ $# -lt 1 ]]; then
+  echo "Usage: nixos-config-publish <github-repo-url>"
+  echo ""
+  echo "This will:"
+  echo "  1. Add the URL as 'origin' remote"
+  echo "  2. Push your configuration to GitHub"
+  echo ""
+  echo "First, create an empty repository on GitHub, then run:"
+  echo "  nixos-config-publish git@github.com:YOUR_USERNAME/YOUR_REPO.git"
+  exit 1
+fi
+
+REPO_URL="$1"
+cd "$CONFIG_DIR"
+
+# Check if origin already exists
+if git remote get-url origin &>/dev/null; then
+  echo "Remote 'origin' already exists: $(git remote get-url origin)"
+  read -p "Replace with $REPO_URL? [y/N] " -n 1 -r
+  echo
+  if [[ $REPLY =~ ^[Yy]$ ]]; then
+    git remote set-url origin "$REPO_URL"
+  else
+    exit 1
+  fi
+else
+  git remote add origin "$REPO_URL"
+fi
+
+echo "Pushing to $REPO_URL..."
+git push -u origin main || git push -u origin master
+
+echo ""
+echo "✓ Configuration published!"
+echo ""
+echo "Your config is now at: $REPO_URL"
+echo ""
+echo "To install on another machine, use:"
+echo "  NixOS Easy Install → Custom URL → $REPO_URL"
+SCRIPT
+      chmod +x /mnt/usr/local/bin/nixos-config-publish
+      log "Created /usr/local/bin/nixos-config-publish helper script"
+    fi
     
     # ============================================================
     # Done!
     # ============================================================
     
-    log ""
-    log "============================================"
-    log "   Installation Complete!"
-    log "============================================"
-    log ""
-    log "Your NixOS system has been installed to the loopback disk."
-    log ""
-    log "Next steps:"
-    log "  1. Reboot into Windows"
-    log "  2. Select NixOS from the boot menu"
-    log "  3. Log in as '$USERNAME'"
-    log ""
-    log "IMPORTANT: Your configuration uses x1e-nixos-config for"
-    log "Snapdragon X Elite support. Keep it updated!"
+    clear
+    echo ""
+    echo "  ╔════════════════════════════════════════════╗"
+    echo "  ║                                            ║"
+    echo "  ║        Installation Complete!              ║"
+    echo "  ║                                            ║"
+    echo "  ║   Your NixOS system is ready.              ║"
+    echo "  ║                                            ║"
+    echo "  ╠════════════════════════════════════════════╣"
+    echo "  ║                                            ║"
+    echo "  ║   Device:   $DEVICE_MODEL"
+    echo "  ║   Hostname: $HOSTNAME"
+    echo "  ║   Username: $USERNAME"
+    echo "  ║                                            ║"
+    echo "  ╠════════════════════════════════════════════╣"
+    echo "  ║                                            ║"
+    echo "  ║   Next steps:                              ║"
+    echo "  ║   1. Reboot into Windows                   ║"
+    echo "  ║   2. Select NixOS from boot menu           ║"
+    echo "  ║   3. Log in as '$USERNAME'"
+    echo "  ║                                            ║"
+    if [[ "$FLAKE_TYPE" == "starter" || "$FLAKE_TYPE" == "minimal" ]]; then
+    echo "  ║   To publish your config to GitHub:        ║"
+    echo "  ║   nixos-config-publish <your-repo-url>     ║"
+    echo "  ║                                            ║"
+    fi
+    echo "  ║   Config location: /etc/nixos/             ║"
+    echo "  ║   See /etc/nixos/README.md for help        ║"
+    echo "  ║                                            ║"
+    echo "  ╚════════════════════════════════════════════╝"
+    echo ""
+    
+    log "Installation complete for $DEVICE_MODEL"
     log ""
     log "Press Enter to reboot, or Ctrl+C to drop to shell..."
     read -r
