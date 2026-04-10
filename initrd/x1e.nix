@@ -187,15 +187,58 @@ in {
     
     # Copy Device Tree Blob - REQUIRED for X1E hardware initialization
     # The DTB tells the kernel about the specific hardware (display, USB, etc.)
+    DTB_PKG="${nixosSystem.config.hardware.deviceTree.package or ""}"
+    DTB_NAME="${nixosSystem.config.hardware.deviceTree.name or ""}"
+    
     mkdir -p $out/dtbs
-    if [ -d "${nixosSystem.config.hardware.deviceTree.package}/dtbs" ]; then
-      cp -r ${nixosSystem.config.hardware.deviceTree.package}/dtbs/* $out/dtbs/
+    
+    # Try to find and copy DTBs from the deviceTree package
+    if [ -n "$DTB_PKG" ] && [ -d "$DTB_PKG/dtbs" ]; then
+      cp -r "$DTB_PKG/dtbs/"* $out/dtbs/ 2>/dev/null || true
     fi
     
-    # Also copy the specific DTB we need for Yoga Slim 7x
-    DTB_NAME="${nixosSystem.config.hardware.deviceTree.name}"
-    if [ -f "$out/dtbs/$DTB_NAME" ]; then
+    # Also try the kernel's built-in DTBs
+    KERNEL_DTBS="${nixosSystem.config.system.build.kernel}/dtbs"
+    if [ -d "$KERNEL_DTBS" ]; then
+      cp -r "$KERNEL_DTBS/"* $out/dtbs/ 2>/dev/null || true
+    fi
+    
+    # Copy the specific DTB we need (Yoga Slim 7x)
+    YOGA_DTB="qcom/x1e80100-lenovo-yoga-slim7x.dtb"
+    if [ -f "$out/dtbs/$YOGA_DTB" ]; then
+      cp "$out/dtbs/$YOGA_DTB" $out/device.dtb
+      echo "$YOGA_DTB" > $out/dtb-name
+    elif [ -n "$DTB_NAME" ] && [ -f "$out/dtbs/$DTB_NAME" ]; then
       cp "$out/dtbs/$DTB_NAME" $out/device.dtb
+      echo "$DTB_NAME" > $out/dtb-name
+    else
+      echo "WARNING: Could not find DTB - checking all available:" >&2
+      find $out/dtbs -name "*.dtb" -type f 2>/dev/null | head -10 >&2 || true
+      
+      # Try to find any X1E DTB as fallback
+      X1E_DTB=$(find $out/dtbs -name "*x1e80100*.dtb" -type f 2>/dev/null | head -1 || true)
+      if [ -n "$X1E_DTB" ]; then
+        echo "Found fallback X1E DTB: $X1E_DTB" >&2
+        cp "$X1E_DTB" $out/device.dtb
+        basename "$X1E_DTB" > $out/dtb-name
+      fi
+    fi
+    
+    # Verify critical files exist
+    if [ ! -f "$out/bzImage" ]; then
+      echo "ERROR: Kernel image not found!" >&2
+      exit 1
+    fi
+    if [ ! -f "$out/initrd" ]; then
+      echo "ERROR: Initrd not found!" >&2
+      exit 1
+    fi
+    if [ ! -f "$out/device.dtb" ]; then
+      echo "ERROR: Device Tree Blob not found - X1E will not boot correctly!" >&2
+      echo "DTB_PKG was: $DTB_PKG" >&2
+      echo "DTB_NAME was: $DTB_NAME" >&2
+      ls -la $out/dtbs/ 2>/dev/null || echo "No dtbs directory" >&2
+      exit 1
     fi
     
     # Export the init path - required for booting NixOS
@@ -204,13 +247,9 @@ in {
     # Export device info for the Windows installer
     echo "x1e" > $out/platform
     echo "lenovo-yoga-slim7x" > $out/default-device
-    echo "$DTB_NAME" > $out/dtb-name
     
     cd $out
-    sha256sum bzImage initrd init-path platform default-device > SHA256SUMS
-    if [ -f device.dtb ]; then
-      sha256sum device.dtb >> SHA256SUMS
-    fi
+    sha256sum bzImage initrd init-path platform default-device device.dtb > SHA256SUMS
   '';
   
   # Default is the toplevel for backwards compatibility

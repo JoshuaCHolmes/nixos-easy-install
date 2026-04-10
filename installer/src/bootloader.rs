@@ -196,12 +196,23 @@ pub fn setup_bootloader(
         create_boot_entry(&nixos_folder.join(shim_name), display_name)?
     };
     
-    // Verify the boot entry was actually created (skip for NVRAM direct writes)
-    if arch != "aarch64" && !verify_boot_entry(&boot_entry_id)? {
+    // Verify the boot entry was actually created
+    let verified = if arch == "aarch64" {
+        // For ARM64, verify by reading BootOrder from NVRAM
+        verify_uefi_boot_entry(&boot_entry_id).unwrap_or_else(|e| {
+            warn!("Could not verify ARM64 boot entry: {}", e);
+            // Assume success if we can't verify - the create call succeeded
+            true
+        })
+    } else {
+        verify_boot_entry(&boot_entry_id)?
+    };
+    
+    if !verified {
         // Try to clean up the files we copied
         warn!("Boot entry creation could not be verified, cleaning up...");
         let _ = fs::remove_dir_all(&nixos_folder);
-        bail!("Boot entry creation failed - entry {} not found in bcdedit output", boot_entry_id);
+        bail!("Boot entry creation failed - entry {} not found", boot_entry_id);
     }
     
     info!("Bootloader setup complete. Entry ID: {}", boot_entry_id);
@@ -224,6 +235,31 @@ fn verify_boot_entry(entry_id: &str) -> Result<bool> {
     
     let output_str = String::from_utf8_lossy(&output.stdout);
     Ok(output_str.contains(entry_id))
+}
+
+/// Verify that a UEFI boot entry exists by checking BootOrder
+/// 
+/// For ARM64, we can't use bcdedit, so we read back the BootOrder variable
+/// and verify our entry number is present.
+#[cfg(target_os = "windows")]
+fn verify_uefi_boot_entry(entry_id: &str) -> Result<bool> {
+    // Entry ID is like "Boot0001" - extract the number
+    if !entry_id.starts_with("Boot") {
+        return Ok(false);
+    }
+    let num_str = &entry_id[4..];
+    let entry_num: u16 = u16::from_str_radix(num_str, 16)
+        .context("Invalid boot entry ID format")?;
+    
+    // Read BootOrder and check if our entry is present
+    let boot_order = read_boot_order()?;
+    Ok(boot_order.contains(&entry_num))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn verify_uefi_boot_entry(_entry_id: &str) -> Result<bool> {
+    // Can't verify on non-Windows
+    Ok(true)
 }
 
 /// Create UEFI boot entry using bcdedit
@@ -399,8 +435,11 @@ fn create_uefi_boot_entry_direct(esp: &EspInfo, efi_path: &Path, description: &s
     let mut new_boot_order = boot_order.clone();
     new_boot_order.push(boot_num);
     if let Err(e) = write_boot_order(&new_boot_order) {
-        warn!("Failed to update BootOrder after creating {}: {}. Boot entry may be orphaned.", 
-              boot_var_name, e);
+        // Rollback: delete the Boot#### we just created to avoid orphaned entry
+        warn!("Failed to update BootOrder, rolling back Boot#### creation: {}", e);
+        if let Err(del_err) = delete_uefi_variable(&boot_var_name, EFI_GLOBAL_GUID) {
+            warn!("Could not delete orphaned boot entry {}: {}", boot_var_name, del_err);
+        }
         return Err(e);
     }
     
@@ -575,6 +614,31 @@ fn write_uefi_variable(name: &str, guid: &str, data: &[u8]) -> Result<()> {
     
     result.context(format!("Failed to write UEFI variable {}", name))?;
     debug!("Wrote UEFI variable {} ({} bytes)", name, data.len());
+    Ok(())
+}
+
+/// Delete a UEFI variable (used for rollback)
+#[cfg(windows)]
+fn delete_uefi_variable(name: &str, guid: &str) -> Result<()> {
+    use windows::Win32::System::WindowsProgramming::SetFirmwareEnvironmentVariableExW;
+    use windows::core::PCWSTR;
+    
+    let var_name: Vec<u16> = format!("{}\0", name).encode_utf16().collect();
+    let guid_name: Vec<u16> = format!("{}\0", guid).encode_utf16().collect();
+    
+    // Writing with size 0 deletes the variable
+    let result = unsafe {
+        SetFirmwareEnvironmentVariableExW(
+            PCWSTR(var_name.as_ptr()),
+            PCWSTR(guid_name.as_ptr()),
+            None,
+            0,
+            0,
+        )
+    };
+    
+    result.context(format!("Failed to delete UEFI variable {}", name))?;
+    debug!("Deleted UEFI variable {}", name);
     Ok(())
 }
 

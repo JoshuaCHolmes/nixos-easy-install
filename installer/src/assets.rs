@@ -301,8 +301,11 @@ pub fn download_boot_assets_for_arch(cache_dir: &Path, arch: &str) -> Result<Boo
     
     fs::create_dir_all(cache_dir)?;
     
+    // Normalize architecture - X1E uses same shim/GRUB as generic aarch64
+    let base_arch = if arch.starts_with("aarch64") { "aarch64" } else { "x86_64" };
+    
     // Determine filenames based on architecture
-    let (shim_name, grub_name, mm_name, fb_name) = if arch == "aarch64" {
+    let (shim_name, grub_name, mm_name, fb_name) = if base_arch == "aarch64" {
         ("shimaa64.efi", "grubaa64.efi", "mmaa64.efi", "fbaa64.efi")
     } else {
         ("shimx64.efi", "grubx64.efi", "mmx64.efi", "fbx64.efi")
@@ -314,7 +317,7 @@ pub fn download_boot_assets_for_arch(cache_dir: &Path, arch: &str) -> Result<Boo
         fallback: cache_dir.join(fb_name),
         grub: cache_dir.join(grub_name),
         asset_dir: cache_dir.to_path_buf(),
-        arch: arch.to_string(),
+        arch: base_arch.to_string(),
     };
     
     // Check cache
@@ -324,14 +327,14 @@ pub fn download_boot_assets_for_arch(cache_dir: &Path, arch: &str) -> Result<Boo
     }
     
     // Select URLs based on architecture
-    let (shim_url, grub_url, grub_signed_name) = if arch == "aarch64" {
+    let (shim_url, grub_url, grub_signed_name) = if base_arch == "aarch64" {
         (SHIM_SIGNED_URL_AA64, GRUB_SIGNED_URL_AA64, "grubaa64.efi.signed")
     } else {
         (SHIM_SIGNED_URL_X64, GRUB_SIGNED_URL_X64, "grubx64.efi.signed")
     };
     
     // Download shim-signed
-    info!("Downloading shim-signed package for {}...", arch);
+    info!("Downloading shim-signed package for {}...", base_arch);
     let shim_deb = download_file(shim_url, cache_dir, "shim-signed.deb")?;
     extract_deb_efi_files(&shim_deb, cache_dir, &[shim_name, mm_name, fb_name])?;
     fs::remove_file(&shim_deb)?;
@@ -424,10 +427,11 @@ pub fn download_installer_assets_for_platform(cache_dir: &Path, platform: Hardwa
             return Ok(assets);
         } else {
             info!("Platform changed from {:?} to {}, re-downloading...", cached_platform, arch_str);
-            // Clear stale cache
+            // Clear stale cache completely
             let _ = fs::remove_file(&assets.kernel);
             let _ = fs::remove_file(&assets.initrd);
             let _ = fs::remove_file(&init_path_file);
+            let _ = fs::remove_file(&platform_file);
             let _ = fs::remove_file(&dtb_file);
         }
     }
@@ -473,7 +477,14 @@ pub fn download_installer_assets_for_platform(cache_dir: &Path, platform: Hardwa
     
     // Read init path if available
     if init_path_file.exists() {
-        assets.init_path = fs::read_to_string(&init_path_file).ok().map(|s| s.trim().to_string());
+        let init_path = fs::read_to_string(&init_path_file)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        if init_path.is_none() {
+            warn!("init-path file exists but is empty - boot will likely fail!");
+        }
+        assets.init_path = init_path;
         info!("Init path: {:?}", assets.init_path);
     } else {
         warn!("No init-path file found - kernel may fail to boot without init= parameter");

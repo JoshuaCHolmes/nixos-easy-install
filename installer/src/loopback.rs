@@ -307,14 +307,25 @@ fn create_sparse_file(path: &Path, size: u64) -> Result<()> {
 fn get_available_space(path: &Path) -> Result<u64> {
     use std::process::Command;
     
-    let drive = path.to_string_lossy()
-        .chars()
-        .take(2)
-        .collect::<String>();
+    let path_str = path.to_string_lossy();
+    
+    // Handle different path formats:
+    // - Standard paths: "C:\...", "D:\..."
+    // - UNC paths: "\\server\share\..."
+    let drive_letter = if path_str.starts_with("\\\\") {
+        // UNC path - use Get-Volume on the root share
+        bail!("UNC paths are not supported for NixOS installation target");
+    } else if path_str.len() >= 2 && path_str.chars().nth(1) == Some(':') {
+        path_str.chars().next().unwrap_or('C')
+    } else {
+        // Relative or malformed path - assume C:
+        warn!("Could not determine drive letter from path {:?}, assuming C:", path);
+        'C'
+    };
     
     let script = format!(
         "(Get-Volume -DriveLetter '{}').SizeRemaining",
-        drive.chars().next().unwrap_or('C')
+        drive_letter
     );
     
     let output = Command::new("powershell")
@@ -351,14 +362,21 @@ fn get_available_space(path: &Path) -> Result<u64> {
 fn get_filesystem_type(path: &Path) -> Result<String> {
     use std::process::Command;
     
-    let drive = path.to_string_lossy()
-        .chars()
-        .take(2)
-        .collect::<String>();
+    let path_str = path.to_string_lossy();
+    
+    // Handle different path formats
+    let drive_letter = if path_str.starts_with("\\\\") {
+        bail!("UNC paths are not supported for NixOS installation target");
+    } else if path_str.len() >= 2 && path_str.chars().nth(1) == Some(':') {
+        path_str.chars().next().unwrap_or('C')
+    } else {
+        warn!("Could not determine drive letter from path {:?}, assuming C:", path);
+        'C'
+    };
     
     let script = format!(
         "(Get-Volume -DriveLetter '{}').FileSystem",
-        drive.chars().next().unwrap_or('C')
+        drive_letter
     );
     
     let output = Command::new("powershell")
