@@ -472,7 +472,7 @@ async fn download_boot_assets(config: &InstallConfig) -> Result<BootFiles> {
     // Detect architecture at runtime
     let platform = crate::assets::detect_platform();
     let arch = platform.base_arch();
-    let has_dtb = platform.needs_custom_kernel();
+    let needs_dtb = platform.needs_custom_kernel();
     
     info!("Detected platform: {} (arch: {})", platform.display_name(), arch);
     
@@ -484,6 +484,20 @@ async fn download_boot_assets(config: &InstallConfig) -> Result<BootFiles> {
     
     // Download the NixOS installer kernel and initrd (platform-specific for X1E)
     let installer_assets = crate::assets::download_installer_assets_for_platform(&cache_dir, platform)?;
+    
+    // Verify DTB is present if platform requires it
+    let has_dtb = if needs_dtb {
+        if installer_assets.device_dtb.is_none() {
+            anyhow::bail!(
+                "Platform {} requires a Device Tree Blob but none was downloaded.\n\
+                This is a critical requirement for {} devices to boot.",
+                platform.display_name(), platform.display_name()
+            );
+        }
+        true
+    } else {
+        installer_assets.device_dtb.is_some()
+    };
     
     // Generate GRUB config based on install type
     let install_type = &config.install_type;
