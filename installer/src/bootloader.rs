@@ -147,6 +147,16 @@ pub fn setup_bootloader(
 ) -> Result<BootloaderSetupResult> {
     info!("Setting up {} bootloader on ESP at {:?}", boot_files.arch, esp.mount_point);
     
+    // Validate architecture matches detected system
+    let detected_arch = crate::assets::detect_arch();
+    let boot_arch = if boot_files.arch.starts_with("aarch64") { "aarch64" } else { &boot_files.arch };
+    if detected_arch != boot_arch {
+        bail!(
+            "Architecture mismatch: boot files are for {} but system detected as {}",
+            boot_files.arch, detected_arch
+        );
+    }
+    
     // Run preflight
     let preflight = preflight_check(esp)?;
     if !preflight.passed {
@@ -161,7 +171,7 @@ pub fn setup_bootloader(
         .context("Failed to create NixOS boot folder")?;
     
     // Determine filenames based on architecture
-    let (shim_name, grub_name) = if boot_files.arch == "aarch64" {
+    let (shim_name, grub_name) = if boot_files.arch == "aarch64" || boot_files.arch.starts_with("aarch64") {
         ("shimaa64.efi", "grubaa64.efi")
     } else {
         ("shimx64.efi", "grubx64.efi")
@@ -307,21 +317,39 @@ fn create_boot_entry(efi_path: &Path, display_name: &str) -> Result<String> {
     // Set the device and path for the new entry
     let esp_letter = path_str.chars().next().unwrap_or('S');
     
-    Command::new("bcdedit")
+    let device_output = Command::new("bcdedit")
         .args(["/set", &guid, "device", &format!("partition={}:", esp_letter)])
         .output()
-        .context("Failed to set device")?;
+        .context("Failed to run bcdedit /set device")?;
     
-    Command::new("bcdedit")
+    if !device_output.status.success() {
+        let stderr = String::from_utf8_lossy(&device_output.stderr);
+        warn!("bcdedit /set device stderr: {}", stderr);
+        bail!("Failed to set boot entry device: {}", stderr);
+    }
+    
+    let path_output = Command::new("bcdedit")
         .args(["/set", &guid, "path", relative_path])
         .output()
-        .context("Failed to set path")?;
+        .context("Failed to run bcdedit /set path")?;
+    
+    if !path_output.status.success() {
+        let stderr = String::from_utf8_lossy(&path_output.stderr);
+        warn!("bcdedit /set path stderr: {}", stderr);
+        bail!("Failed to set boot entry path: {}", stderr);
+    }
     
     // Add to the display order (but not first - Windows stays default)
-    Command::new("bcdedit")
+    let order_output = Command::new("bcdedit")
         .args(["/displayorder", &guid, "/addlast"])
         .output()
-        .context("Failed to add to display order")?;
+        .context("Failed to run bcdedit /displayorder")?;
+    
+    if !order_output.status.success() {
+        let stderr = String::from_utf8_lossy(&order_output.stderr);
+        warn!("bcdedit /displayorder stderr: {} (non-fatal)", stderr);
+        // Don't fail here - entry is created, just not in display order
+    }
     
     Ok(guid)
 }
@@ -368,18 +396,36 @@ fn create_firmware_boot_entry(efi_path: &Path, display_name: &str) -> Result<Str
     let guid = parse_bcdedit_guid(&output_str)?;
     
     // Configure the entry
-    Command::new("bcdedit")
+    let device_output = Command::new("bcdedit")
         .args(["/set", &guid, "device", &format!("partition={}:", drive_letter)])
-        .output()?;
+        .output()
+        .context("Failed to run bcdedit /set device")?;
     
-    Command::new("bcdedit")
+    if !device_output.status.success() {
+        let stderr = String::from_utf8_lossy(&device_output.stderr);
+        warn!("bcdedit /set device failed: {}", stderr);
+    }
+    
+    let path_output = Command::new("bcdedit")
         .args(["/set", &guid, "path", relative_path])
-        .output()?;
+        .output()
+        .context("Failed to run bcdedit /set path")?;
+    
+    if !path_output.status.success() {
+        let stderr = String::from_utf8_lossy(&path_output.stderr);
+        warn!("bcdedit /set path failed: {}", stderr);
+    }
     
     // Add to firmware menu
-    Command::new("bcdedit")
+    let order_output = Command::new("bcdedit")
         .args(["/set", "{fwbootmgr}", "displayorder", &guid, "/addlast"])
-        .output()?;
+        .output()
+        .context("Failed to run bcdedit displayorder")?;
+    
+    if !order_output.status.success() {
+        let stderr = String::from_utf8_lossy(&order_output.stderr);
+        warn!("bcdedit displayorder failed (non-fatal): {}", stderr);
+    }
     
     Ok(guid)
 }
@@ -669,7 +715,15 @@ fn get_partition_info(mount_point: &Path) -> Result<(String, u32)> {
         let parts: Vec<&str> = result.split('|').collect();
         if parts.len() >= 2 {
             let guid = parts[0].trim();
-            let part_num: u32 = parts[1].trim().parse().unwrap_or(1);
+            let part_num_str = parts[1].trim();
+            
+            // Parse partition number with error handling
+            let part_num: u32 = part_num_str.parse()
+                .context(format!("Invalid partition number '{}' from PowerShell", part_num_str))?;
+            
+            if part_num == 0 {
+                bail!("Invalid partition number 0 - ESP partition detection failed");
+            }
             
             let formatted_guid = if guid.starts_with('{') { 
                 guid.to_string() 
@@ -682,6 +736,10 @@ fn get_partition_info(mount_point: &Path) -> Result<(String, u32)> {
         }
     }
     
+    // PowerShell detection failed - this is more dangerous, warn loudly
+    warn!("PowerShell partition detection failed. Falling back to mountvol + partition 1.");
+    warn!("If your ESP is not on partition 1, the boot entry will be incorrect!");
+    
     // Fallback: try to get GUID from mountvol, assume partition 1
     let mv_output = Command::new("mountvol")
         .arg(mount_point)
@@ -691,7 +749,7 @@ fn get_partition_info(mount_point: &Path) -> Result<(String, u32)> {
     // Parse volume GUID from something like \\?\Volume{guid}\
     if let Some(start) = mv_str.find('{') {
         if let Some(end) = mv_str.find('}') {
-            warn!("Could not get partition number, assuming 1");
+            warn!("Using partition 1 as fallback - verify this is correct for your system");
             return Ok((mv_str[start..=end].to_string(), 1));
         }
     }
