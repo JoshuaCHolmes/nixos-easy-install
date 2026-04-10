@@ -6,100 +6,353 @@
 { pkgs, x1e-nixos-config }:
 
 let
-  # Create installer script inline (same as in default.nix)
+  # Full installer script - mirrors default.nix but with X1E-specific handling
   installerScript = pkgs.writeShellScriptBin "nixos-easy-installer" ''
-    #!/usr/bin/env bash
     set -euo pipefail
     
-    echo "==========================================="
-    echo "   NixOS Easy Installer (Snapdragon X1E)"
-    echo "==========================================="
+    export PATH="${pkgs.lib.makeBinPath (with pkgs; [
+      coreutils util-linux e2fsprogs dosfstools parted
+      nix git curl jq ntfs3g kmod gawk pciutils dmidecode usbutils
+    ])}:$PATH"
+
+    CONFIG_PATH="/boot/efi/EFI/NixOS/install-config.json"
+    LOG="/tmp/install.log"
+    
+    log() {
+      echo "[$(date '+%H:%M:%S')] $*" | tee -a "$LOG"
+    }
+    
+    fail() {
+      log "FATAL: $*"
+      log "Installation failed. Dropping to shell for debugging."
+      log "Check $LOG for details."
+      exec /bin/bash
+    }
+    
+    # ============================================================
+    # Initial Setup
+    # ============================================================
+    
+    clear
     echo ""
-    echo "Hardware: Snapdragon X Elite detected"
+    echo "  ███╗   ██╗██╗██╗  ██╗ ██████╗ ███████╗"
+    echo "  ████╗  ██║██║╚██╗██╔╝██╔═══██╗██╔════╝"
+    echo "  ██╔██╗ ██║██║ ╚███╔╝ ██║   ██║███████╗"
+    echo "  ██║╚██╗██║██║ ██╔██╗ ██║   ██║╚════██║"
+    echo "  ██║ ╚████║██║██╔╝ ╚██╗╚██████╔╝███████║"
+    echo "  ╚═╝  ╚═══╝╚═╝╚═╝   ╚═╝ ╚═════╝ ╚══════╝"
+    echo ""
+    echo "    Easy Install - Snapdragon X Elite"
     echo ""
     
-    # Read installer config from ESP
-    CONFIG_FILE="/boot/efi/EFI/NixOS/install-config.json"
+    log "NixOS Easy Install (X1E) - Starting"
+    log "===================================="
+    log "Hardware: Snapdragon X Elite detected"
     
-    if [ -f "$CONFIG_FILE" ]; then
-      echo "Found installer configuration..."
-      INSTALL_TYPE=$(jq -r '.install_type' "$CONFIG_FILE")
-      HOSTNAME=$(jq -r '.hostname' "$CONFIG_FILE")
-      USERNAME=$(jq -r '.username' "$CONFIG_FILE")
-      # Flake config - get URL from flake.url or flake config
-      FLAKE_TYPE=$(jq -r '.flake.type // "starter"' "$CONFIG_FILE")
-      CONFIG_URL=$(jq -r '.flake.url // empty' "$CONFIG_FILE")
-      FLAKE_HOSTNAME=$(jq -r '.flake.hostname // .hostname' "$CONFIG_FILE")
-      # Loopback config
-      LOOPBACK_TARGET=$(jq -r '.loopback.target_dir // empty' "$CONFIG_FILE")
-      LOOPBACK_SIZE=$(jq -r '.loopback.size_gb // 32' "$CONFIG_FILE")
-      
-      echo "Install type: $INSTALL_TYPE"
-      echo "Hostname: $HOSTNAME"
-      echo "Flake type: $FLAKE_TYPE"
-      [ -n "$CONFIG_URL" ] && echo "Config URL: $CONFIG_URL"
-      
-      if [ "$INSTALL_TYPE" = "loopback" ] && [ -n "$LOOPBACK_TARGET" ]; then
-        echo "Loopback target: $LOOPBACK_TARGET"
-        
-        # Mount the NTFS partition and setup the loopback
-        # Note: Path like C:\NixOS or C:/NixOS means the C: partition
-        # Convert backslashes to forward slashes and extract drive letter
-        LOOPBACK_PATH=$(echo "$LOOPBACK_TARGET" | sed 's|\\|/|g')
-        DRIVE_LETTER=$(echo "$LOOPBACK_PATH" | cut -d: -f1)
-        echo "Looking for Windows drive: $DRIVE_LETTER"
-        
-        # Find the Windows partition
-        # For now, assume it's the largest NTFS partition
-        NTFS_PART=$(lsblk -o NAME,FSTYPE,SIZE -b -n | grep ntfs | sort -k3 -n | tail -1 | awk '{print $1}')
-        if [ -n "$NTFS_PART" ]; then
-          echo "Found NTFS partition: /dev/$NTFS_PART"
-          mkdir -p /mnt/windows
-          mount -t ntfs3 "/dev/$NTFS_PART" /mnt/windows
-          
-          # Setup loopback
-          LOOP_FILE="/mnt/windows/NixOS/root.disk"
-          if [ -f "$LOOP_FILE" ]; then
-            echo "Found loopback disk at $LOOP_FILE"
-            LOOP_DEV=$(losetup -f --show "$LOOP_FILE")
-            echo "Attached as $LOOP_DEV"
-            
-            # Check if it needs formatting
-            if ! blkid "$LOOP_DEV" | grep -q ext4; then
-              echo "Formatting as ext4..."
-              mkfs.ext4 -L nixos "$LOOP_DEV"
-            fi
-            
-            # Mount for installation
-            mkdir -p /mnt/nixos
-            mount "$LOOP_DEV" /mnt/nixos
-            
-            echo ""
-            echo "Ready for NixOS installation to /mnt/nixos"
-            echo ""
-            echo "To install, run:"
-            echo "  nixos-install --root /mnt/nixos --flake <your-flake>"
-            echo ""
-            echo "IMPORTANT: Your config should import the x1e module:"
-            echo "  inputs.x1e-nixos-config.url = \"github:kuruczgy/x1e-nixos-config\";"
-            echo "  imports = [ x1e-nixos-config.nixosModules.x1e ];"
-            echo "  hardware.lenovo-yoga-slim7x.enable = true;"
-            echo ""
-          else
-            echo "ERROR: Loopback file not found at $LOOP_FILE"
-          fi
-        else
-          echo "ERROR: No NTFS partition found"
-        fi
-      fi
-    else
-      echo "No installer configuration found."
-      echo "You can manually install NixOS from this environment."
+    # Mount ESP to find config
+    log "Looking for EFI System Partition..."
+    mkdir -p /boot/efi
+    
+    # Find ESP by partition type GUID
+    ESP_DEV=$(lsblk -rno NAME,PARTTYPE | grep -i 'c12a7328-f81f-11d2-ba4b-00a0c93ec93b' | head -1 | cut -d' ' -f1)
+    if [[ -z "$ESP_DEV" ]]; then
+      fail "Could not find EFI System Partition"
     fi
     
-    echo ""
-    echo "Dropping to shell..."
-    exec /bin/bash
+    mount "/dev/$ESP_DEV" /boot/efi || fail "Could not mount ESP"
+    log "ESP mounted: /dev/$ESP_DEV -> /boot/efi"
+    
+    # ============================================================
+    # Read configuration
+    # ============================================================
+    
+    if [[ ! -f "$CONFIG_PATH" ]]; then
+      fail "Config not found at $CONFIG_PATH"
+    fi
+    
+    CONFIG=$(cat "$CONFIG_PATH")
+    log "Configuration loaded from $CONFIG_PATH"
+    
+    INSTALL_TYPE=$(echo "$CONFIG" | jq -r '.install_type')
+    HOSTNAME=$(echo "$CONFIG" | jq -r '.hostname')
+    USERNAME=$(echo "$CONFIG" | jq -r '.username')
+    PASSWORD_HASH=$(echo "$CONFIG" | jq -r '.password_hash')
+    FLAKE_TYPE=$(echo "$CONFIG" | jq -r '.flake.type')
+    FLAKE_URL=$(echo "$CONFIG" | jq -r '.flake.url // empty')
+    FLAKE_HOSTNAME=$(echo "$CONFIG" | jq -r '.flake.hostname // .hostname')
+    
+    log "Install type: $INSTALL_TYPE"
+    log "Hostname: $HOSTNAME"
+    log "Username: $USERNAME"
+    log "Flake: $FLAKE_TYPE''${FLAKE_URL:+ ($FLAKE_URL)}"
+    
+    # ============================================================
+    # Partition/Mount setup (loopback only for X1E currently)
+    # ============================================================
+    
+    if [[ "$INSTALL_TYPE" == "loopback" || "$INSTALL_TYPE" == "quick" ]]; then
+      log "Setting up loopback installation..."
+      
+      TARGET_DIR=$(echo "$CONFIG" | jq -r '.loopback.target_dir')
+      SIZE_GB=$(echo "$CONFIG" | jq -r '.loopback.size_gb')
+      
+      log "Target directory: $TARGET_DIR"
+      log "Size: ''${SIZE_GB}GB"
+      
+      # Find the correct Windows NTFS partition
+      log "Looking for Windows partitions..."
+      WINDOWS_PART=""
+      
+      NTFS_PARTS=$(lsblk -rno NAME,FSTYPE | grep -E 'ntfs|ntfs3' | cut -d' ' -f1)
+      
+      if [[ -z "$NTFS_PARTS" ]]; then
+        fail "No NTFS partitions found"
+      fi
+      
+      log "Found NTFS partitions: $NTFS_PARTS"
+      
+      # Try each NTFS partition to find the one with our NixOS directory
+      for PART in $NTFS_PARTS; do
+        log "Checking /dev/$PART..."
+        mkdir -p /mnt/check
+        
+        if mount -t ntfs3 -o ro "/dev/$PART" /mnt/check 2>/dev/null; then
+          # Convert target path for checking (C:\NixOS -> NixOS)
+          CHECK_PATH="/mnt/check/$(echo "$TARGET_DIR" | sed 's|^[A-Za-z]:\\||; s|\\|/|g')"
+          
+          if [[ -d "$CHECK_PATH" ]]; then
+            log "Found NixOS directory on /dev/$PART"
+            WINDOWS_PART="$PART"
+            umount /mnt/check
+            break
+          fi
+          umount /mnt/check
+        fi
+      done
+      
+      # Fallback to largest NTFS partition
+      if [[ -z "$WINDOWS_PART" ]]; then
+        log "NixOS directory not found, using largest NTFS partition..."
+        WINDOWS_PART=$(lsblk -rno NAME,FSTYPE,SIZE | grep -E 'ntfs|ntfs3' | sort -t' ' -k3 -h | tail -1 | cut -d' ' -f1)
+        log "Selected partition: $WINDOWS_PART"
+      fi
+      
+      if [[ -z "$WINDOWS_PART" ]]; then
+        fail "Could not find suitable Windows NTFS partition"
+      fi
+      
+      mkdir -p /mnt/windows
+      mount -t ntfs3 "/dev/$WINDOWS_PART" /mnt/windows || fail "Could not mount Windows partition /dev/$WINDOWS_PART"
+      log "Windows partition mounted: /dev/$WINDOWS_PART"
+      
+      # Derive NixOS directory from target_dir
+      NIXOS_DIR="/mnt/windows/$(echo "$TARGET_DIR" | sed 's|^[A-Za-z]:\\||; s|\\|/|g')"
+      log "NixOS directory: $NIXOS_DIR"
+      
+      if [[ ! -d "$NIXOS_DIR" ]]; then
+        fail "NixOS directory not found: $NIXOS_DIR"
+      fi
+      
+      # Create root.disk if needed
+      if [[ ! -f "$NIXOS_DIR/root.disk" ]]; then
+        log "Creating root.disk (''${SIZE_GB}GB)..."
+        truncate -s "''${SIZE_GB}G" "$NIXOS_DIR/root.disk"
+      fi
+      
+      # Format if needed
+      if ! file "$NIXOS_DIR/root.disk" | grep -q 'ext4'; then
+        log "Formatting root.disk as ext4..."
+        mkfs.ext4 -F -L NIXOS_ROOT "$NIXOS_DIR/root.disk"
+      fi
+      
+      # Mount loopback
+      log "Mounting root.disk..."
+      mkdir -p /mnt
+      mount -o loop "$NIXOS_DIR/root.disk" /mnt || fail "Could not mount root.disk"
+      
+      # Bind mount ESP
+      mkdir -p /mnt/boot
+      mount --bind /boot/efi /mnt/boot
+      
+      log "Loopback filesystems mounted"
+    else
+      fail "X1E installer currently only supports loopback installation"
+    fi
+    
+    # ============================================================
+    # Generate hardware configuration
+    # ============================================================
+    
+    log "Generating hardware configuration..."
+    mkdir -p /mnt/etc/nixos
+    mkdir -p /mnt/etc/nixos-generated
+    nixos-generate-config --root /mnt --dir /mnt/etc/nixos-generated
+    cp /mnt/etc/nixos-generated/*.nix /mnt/etc/nixos/
+    
+    # Add loopback + X1E specific config
+    log "Adding X1E and loopback-specific configuration..."
+    
+    for hwconf in /mnt/etc/nixos-generated/hardware-configuration.nix /mnt/etc/nixos/hardware-configuration.nix; do
+      if [[ -f "$hwconf" ]]; then
+        cat >> "$hwconf" << 'EOF'
+
+  # Loopback installation - boot from disk image on NTFS
+  boot.initrd.supportedFilesystems = [ "ntfs3" ];
+  boot.initrd.availableKernelModules = [ "loop" "ntfs3" ];
+  
+  # X1E-specific kernel parameters (critical for display/USB init)
+  boot.kernelParams = [ "pd_ignore_unused" "clk_ignore_unused" ];
+EOF
+      fi
+    done
+    
+    # ============================================================
+    # Setup flake configuration
+    # ============================================================
+    
+    log "Setting up NixOS configuration..."
+    FLAKE_DIR="/mnt/etc/nixos"
+    
+    if [[ "$FLAKE_TYPE" == "url" && -n "$FLAKE_URL" ]]; then
+      log "Cloning configuration from $FLAKE_URL..."
+      rm -rf "$FLAKE_DIR"
+      git clone "$FLAKE_URL" "$FLAKE_DIR" || fail "Could not clone flake from $FLAKE_URL"
+      
+    elif [[ "$FLAKE_TYPE" == "starter" || "$FLAKE_TYPE" == "minimal" ]]; then
+      log "Creating X1E starter configuration..."
+      
+      cat > "$FLAKE_DIR/flake.nix" << EOF
+{
+  description = "NixOS configuration for Snapdragon X Elite";
+
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    x1e-nixos-config = {
+      url = "github:kuruczgy/x1e-nixos-config";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+  };
+
+  outputs = { self, nixpkgs, x1e-nixos-config, ... }: {
+    nixosConfigurations.$HOSTNAME = nixpkgs.lib.nixosSystem {
+      system = "aarch64-linux";
+      modules = [
+        x1e-nixos-config.nixosModules.x1e
+        ./configuration.nix
+        ./hardware-configuration.nix
+      ];
+    };
+  };
+}
+EOF
+
+      cat > "$FLAKE_DIR/configuration.nix" << EOF
+{ config, pkgs, ... }:
+
+{
+  system.stateVersion = "24.11";
+  
+  # Enable Lenovo Yoga Slim 7x hardware support
+  # Change this for other X1E devices (e.g., hardware.thinkpad-t14s-gen6.enable)
+  hardware.lenovo-yoga-slim7x.enable = true;
+  
+  # Network
+  networking.hostName = "$HOSTNAME";
+  networking.networkmanager.enable = true;
+  
+  # Timezone (change as needed)
+  time.timeZone = "America/Chicago";
+  
+  # User account
+  users.users.$USERNAME = {
+    isNormalUser = true;
+    extraGroups = [ "wheel" "networkmanager" "video" "audio" ];
+    hashedPassword = "$PASSWORD_HASH";
+  };
+  
+  # Essential packages
+  environment.systemPackages = with pkgs; [
+    vim git curl wget htop
+  ];
+  
+  # Enable sudo
+  security.sudo.enable = true;
+  
+  # Boot configuration for loopback install
+  boot.loader.systemd-boot.enable = true;
+  boot.loader.efi.canTouchEfiVariables = true;
+}
+EOF
+
+      log "Starter configuration created"
+    fi
+    
+    # ============================================================
+    # Run nixos-install
+    # ============================================================
+    
+    log "Starting nixos-install (this may take a while)..."
+    log "You can follow progress in another tty (Alt+F2)"
+    
+    INSTALL_HOSTNAME="$HOSTNAME"
+    
+    if [[ -f "$FLAKE_DIR/flake.nix" ]]; then
+      log "Installing from flake: $FLAKE_DIR#$INSTALL_HOSTNAME"
+      nixos-install --root /mnt \
+        --flake "$FLAKE_DIR#$INSTALL_HOSTNAME" \
+        --no-root-passwd \
+        --no-channel-copy \
+        2>&1 | tee -a "$LOG"
+    else
+      log "Installing from configuration.nix"
+      nixos-install --root /mnt \
+        --no-root-passwd \
+        2>&1 | tee -a "$LOG"
+    fi
+    
+    INSTALL_EXIT=$?
+    if [[ $INSTALL_EXIT -ne 0 ]]; then
+      fail "nixos-install failed with exit code $INSTALL_EXIT"
+    fi
+    
+    log "NixOS installation complete!"
+    
+    # ============================================================
+    # Post-install cleanup
+    # ============================================================
+    
+    log "Performing post-install cleanup..."
+    
+    # Remove install config (contains password hash)
+    rm -f "$CONFIG_PATH"
+    
+    # Copy install log
+    cp "$LOG" /mnt/var/log/nixos-easy-install.log 2>/dev/null || true
+    
+    # ============================================================
+    # Done!
+    # ============================================================
+    
+    log ""
+    log "============================================"
+    log "   Installation Complete!"
+    log "============================================"
+    log ""
+    log "Your NixOS system has been installed to the loopback disk."
+    log ""
+    log "Next steps:"
+    log "  1. Reboot into Windows"
+    log "  2. Select NixOS from the boot menu"
+    log "  3. Log in as '$USERNAME'"
+    log ""
+    log "IMPORTANT: Your configuration uses x1e-nixos-config for"
+    log "Snapdragon X Elite support. Keep it updated!"
+    log ""
+    log "Press Enter to reboot, or Ctrl+C to drop to shell..."
+    read -r
+    
+    umount -R /mnt 2>/dev/null || true
+    reboot
   '';
 
 in

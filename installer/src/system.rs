@@ -529,6 +529,10 @@ pub fn elevate() -> Result<()> {
     use std::process::Command;
     
     let exe = std::env::current_exe()?;
+    let exe_str = exe.to_string_lossy();
+    
+    // Escape single quotes in path by doubling them (PowerShell string escape)
+    let escaped_path = exe_str.replace("'", "''");
     
     info!("Requesting administrator privileges...");
     
@@ -538,7 +542,7 @@ pub fn elevate() -> Result<()> {
             "-Command",
             &format!(
                 "Start-Process '{}' -Verb RunAs",
-                exe.display()
+                escaped_path
             ),
         ])
         .status()

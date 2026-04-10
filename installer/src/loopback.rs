@@ -318,9 +318,13 @@ fn create_sparse_file(path: &Path, size: u64) -> Result<()> {
 fn create_sparse_file(path: &Path, size: u64) -> Result<()> {
     use std::process::Command;
     
-    // Use truncate on Unix
+    // Quote the path to handle spaces properly
+    let path_str = path.to_string_lossy().to_string();
+    
     let output = Command::new("truncate")
-        .args(["-s", &size.to_string(), &path.to_string_lossy()])
+        .arg("-s")
+        .arg(size.to_string())
+        .arg(&path_str)
         .output()
         .context("Failed to create sparse file")?;
     
@@ -362,8 +366,17 @@ fn get_available_space(path: &Path) -> Result<u64> {
         .output()
         .context("Failed to get available space")?;
     
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("PowerShell failed to get available space: {}", stderr.trim());
+    }
+    
     let size_str = String::from_utf8_lossy(&output.stdout);
-    size_str.trim().parse().context("Failed to parse available space")
+    let trimmed = size_str.trim();
+    if trimmed.is_empty() {
+        bail!("PowerShell returned empty output for available space on drive {}", drive_letter);
+    }
+    trimmed.parse().context(format!("Failed to parse available space '{}' as number", trimmed))
 }
 
 #[cfg(not(windows))]
@@ -413,7 +426,16 @@ fn get_filesystem_type(path: &Path) -> Result<String> {
         .output()
         .context("Failed to get filesystem type")?;
     
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("PowerShell failed to get filesystem type: {}", stderr.trim());
+    }
+    
+    let fstype = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if fstype.is_empty() {
+        bail!("PowerShell returned empty filesystem type for drive {}", drive_letter);
+    }
+    Ok(fstype)
 }
 
 #[cfg(not(windows))]
