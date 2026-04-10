@@ -366,8 +366,30 @@ pub fn download_boot_assets_for_arch(cache_dir: &Path, arch: &str) -> Result<Boo
         bail!("Failed to extract {}", grub_name);
     }
     
+    // Verify EFI executables have valid PE headers
+    verify_efi_executable(&assets.shim, shim_name)?;
+    verify_efi_executable(&assets.grub, grub_name)?;
+    
     info!("Boot assets ready for {}", arch);
     Ok(assets)
+}
+
+/// Verify that a file is a valid PE/EFI executable
+fn verify_efi_executable(path: &Path, name: &str) -> Result<()> {
+    let mut file = File::open(path)?;
+    let mut header = [0u8; 2];
+    file.read_exact(&mut header)?;
+    
+    // DOS/PE header starts with "MZ"
+    if header != [0x4D, 0x5A] {
+        bail!(
+            "{} is not a valid EFI executable (expected MZ header, got {:02X} {:02X})",
+            name, header[0], header[1]
+        );
+    }
+    
+    debug!("{} has valid PE header", name);
+    Ok(())
 }
 
 /// Download a file from URL to destination with optional SHA256 verification
@@ -925,6 +947,7 @@ pub fn verify_assets(assets: &BootAssets) -> Result<()> {
     };
     
     // Check files exist and have reasonable sizes
+    // These ranges are based on Ubuntu 24.04 packages
     let checks = [
         (&assets.shim, shim_name, 800_000, 2_500_000),   // shim varies by arch
         (&assets.grub, grub_name, 1_500_000, 5_000_000), // grub varies by arch
@@ -936,10 +959,18 @@ pub fn verify_assets(assets: &BootAssets) -> Result<()> {
         }
         
         let size = fs::metadata(path)?.len();
-        if size < min_size as u64 || size > max_size as u64 {
-            warn!("{} has unexpected size: {} bytes (expected {}-{})", 
-                  name, size, min_size, max_size);
+        if size < min_size as u64 {
+            bail!(
+                "{} is too small ({} bytes, minimum expected {}). File may be corrupted or download incomplete.",
+                name, size, min_size
+            );
         }
+        if size > max_size as u64 {
+            warn!("{} is larger than expected ({} bytes, expected max {}). This may indicate a version change.",
+                  name, size, max_size);
+        }
+        
+        debug!("{} verified: {} bytes", name, size);
     }
     
     info!("Boot asset verification passed for {}", assets.arch);

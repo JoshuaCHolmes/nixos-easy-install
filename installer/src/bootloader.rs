@@ -1009,9 +1009,21 @@ fn copy_boot_file(src: &Path, dst: &Path, name: &str) -> Result<()> {
         bail!("{} not found at {:?}", name, src);
     }
     
+    let src_size = fs::metadata(src)?.len();
+    
     fs::copy(src, dst)
         .with_context(|| format!("Failed to copy {} to ESP", name))?;
     
+    // Verify the copy was successful
+    let dst_size = fs::metadata(dst)?.len();
+    if src_size != dst_size {
+        bail!(
+            "{} copy verification failed: source {} bytes, destination {} bytes",
+            name, src_size, dst_size
+        );
+    }
+    
+    debug!("{} copied successfully ({} bytes)", name, dst_size);
     Ok(())
 }
 
