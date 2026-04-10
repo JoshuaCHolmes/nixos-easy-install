@@ -365,7 +365,7 @@ fn download_file(url: &str, dir: &Path, filename: &str) -> Result<PathBuf> {
     download_file_with_checksum(url, dir, filename, None)
 }
 
-/// Installer boot assets (kernel + initrd + init path)
+/// Installer boot assets (kernel + initrd + init path + optional DTB)
 #[derive(Debug)]
 pub struct InstallerAssets {
     pub kernel: PathBuf,
@@ -374,6 +374,8 @@ pub struct InstallerAssets {
     pub init_path: Option<String>,
     /// Hardware platform this was built for
     pub platform: Option<String>,
+    /// Device Tree Blob for ARM64 devices (required for X1E)
+    pub device_dtb: Option<PathBuf>,
 }
 
 /// GitHub release URL for installer boot assets
@@ -397,11 +399,13 @@ pub fn download_installer_assets_for_platform(cache_dir: &Path, platform: Hardwa
     
     let init_path_file = cache_dir.join("init-path");
     let platform_file = cache_dir.join("platform");
+    let dtb_file = cache_dir.join("device.dtb");
     let mut assets = InstallerAssets {
         kernel: cache_dir.join("bzImage"),
         initrd: cache_dir.join("initrd"),
         init_path: None,
         platform: None,
+        device_dtb: None,
     };
     
     // Check cache - but verify platform matches
@@ -412,6 +416,10 @@ pub fn download_installer_assets_for_platform(cache_dir: &Path, platform: Hardwa
         if cached_platform.as_deref() == Some(arch_str) || (cached_platform.is_none() && !platform.needs_custom_kernel()) {
             assets.init_path = fs::read_to_string(&init_path_file).ok().map(|s| s.trim().to_string());
             assets.platform = cached_platform;
+            // Check for DTB (X1E only)
+            if dtb_file.exists() {
+                assets.device_dtb = Some(dtb_file);
+            }
             info!("Using cached installer boot files");
             return Ok(assets);
         } else {
@@ -420,6 +428,7 @@ pub fn download_installer_assets_for_platform(cache_dir: &Path, platform: Hardwa
             let _ = fs::remove_file(&assets.kernel);
             let _ = fs::remove_file(&assets.initrd);
             let _ = fs::remove_file(&init_path_file);
+            let _ = fs::remove_file(&dtb_file);
         }
     }
     
@@ -470,6 +479,14 @@ pub fn download_installer_assets_for_platform(cache_dir: &Path, platform: Hardwa
         warn!("No init-path file found - kernel may fail to boot without init= parameter");
     }
     
+    // Check for DTB (X1E platform only)
+    if dtb_file.exists() {
+        assets.device_dtb = Some(dtb_file);
+        info!("Device Tree Blob found for hardware initialization");
+    } else if platform.needs_custom_kernel() {
+        warn!("No device.dtb found for {} - display may not work!", platform.display_name());
+    }
+    
     // Store platform for cache validation
     assets.platform = Some(arch_str.to_string());
     fs::write(&platform_file, arch_str)?;
@@ -492,6 +509,7 @@ pub fn download_installer_assets(cache_dir: &Path, arch: &str) -> Result<Install
         initrd: cache_dir.join("initrd"),
         init_path: None,
         platform: None,
+        device_dtb: None,
     };
     
     // Check cache
@@ -602,12 +620,12 @@ fn extract_tarball(tarball_path: &Path, output_dir: &Path, arch: &str) -> Result
         let path = entry.path()?;
         let path_str = path.to_string_lossy();
         
-        // Looking for arch/bzImage, arch/initrd, and arch/init-path
+        // Looking for arch/bzImage, arch/initrd, arch/init-path, and arch/device.dtb
         let filename = path.file_name()
             .map(|n| n.to_string_lossy().to_string());
         
         if let Some(name) = filename {
-            if path_str.contains(arch) && (name == "bzImage" || name == "initrd" || name == "init-path") {
+            if path_str.contains(arch) && (name == "bzImage" || name == "initrd" || name == "init-path" || name == "device.dtb") {
                 let dest = output_dir.join(&name);
                 debug!("Extracting {} -> {:?}", path_str, dest);
                 entry.unpack(&dest)?;
@@ -770,7 +788,8 @@ fn decompress_gzip(data: &[u8]) -> Result<Vec<u8>> {
 /// loopback image is passed as a parameter for the installer to mount.
 /// 
 /// `init_path` is the path to the NixOS init binary (e.g., /nix/store/...-nixos-.../init)
-pub fn generate_grub_config(nixos_root: &str, install_type: &str, init_path: Option<&str>) -> String {
+/// `has_dtb` indicates if a Device Tree Blob should be loaded (required for ARM64 X1E)
+pub fn generate_grub_config(nixos_root: &str, install_type: &str, init_path: Option<&str>, has_dtb: bool) -> String {
     // Build kernel parameters
     let mut params = Vec::new();
     
@@ -784,12 +803,25 @@ pub fn generate_grub_config(nixos_root: &str, install_type: &str, init_path: Opt
         params.push(format!("nixos.loopback={}/root.disk", nixos_root.replace("\\", "/")));
     }
     
+    // X1E kernel parameters for Snapdragon hardware
+    if has_dtb {
+        params.push("pd_ignore_unused".to_string());
+        params.push("clk_ignore_unused".to_string());
+    }
+    
     let kernel_params = params.join(" ");
 
     // GRUB commands: linuxefi/initrdefi are x86_64-only (for certain Secure Boot setups)
     // ARM64 GRUB doesn't have these commands - must use linux/initrd
     // Ubuntu's signed GRUB works with linux/initrd on both architectures
     let (linux_cmd, initrd_cmd) = ("linux", "initrd");
+    
+    // Device Tree Blob command for ARM64 X1E - must come BEFORE linux command
+    let dtb_cmd = if has_dtb {
+        "    devicetree /EFI/NixOS/device.dtb\n"
+    } else {
+        ""
+    };
 
     format!(r#"# NixOS Easy Install - GRUB Configuration
 # Auto-generated - do not edit manually
@@ -810,13 +842,13 @@ insmod all_video
 # Config file at $prefix/../install-config.json tells installer what to do
 
 menuentry "NixOS Installer" --class nixos --class gnu-linux --class os {{
-    # Load kernel and initrd from ESP (same partition as GRUB)
+{dtb_cmd}    # Load kernel and initrd from ESP (same partition as GRUB)
     {linux_cmd} /EFI/NixOS/bzImage {kernel_params} quiet
     {initrd_cmd} /EFI/NixOS/initrd
 }}
 
 menuentry "NixOS Installer (verbose)" --class nixos --class gnu-linux --class os {{
-    {linux_cmd} /EFI/NixOS/bzImage {kernel_params}
+{dtb_cmd}    {linux_cmd} /EFI/NixOS/bzImage {kernel_params}
     {initrd_cmd} /EFI/NixOS/initrd
 }}
 
@@ -832,6 +864,7 @@ menuentry "UEFI Firmware Settings" {{
         linux_cmd = linux_cmd,
         initrd_cmd = initrd_cmd,
         kernel_params = kernel_params,
+        dtb_cmd = dtb_cmd,
     )
 }
 
@@ -872,7 +905,7 @@ mod tests {
     
     #[test]
     fn test_grub_config_generation() {
-        let config = generate_grub_config("/NixOS", "loopback", Some("/nix/store/test-init"));
+        let config = generate_grub_config("/NixOS", "loopback", Some("/nix/store/test-init"), false);
         assert!(config.contains("NixOS Installer"));
         assert!(config.contains("nixos.loopback=/NixOS/root.disk"));
         assert!(config.contains("init=/nix/store/test-init"));
@@ -882,14 +915,22 @@ mod tests {
     
     #[test]
     fn test_grub_config_partition() {
-        let config = generate_grub_config("/", "partition", None);
+        let config = generate_grub_config("/", "partition", None, false);
         // Partition install doesn't have loopback parameter
         assert!(!config.contains("nixos.loopback"));
     }
     
     #[test]
     fn test_grub_config_with_init() {
-        let config = generate_grub_config("/", "partition", Some("/nix/store/abc-nixos/init"));
+        let config = generate_grub_config("/", "partition", Some("/nix/store/abc-nixos/init"), false);
         assert!(config.contains("init=/nix/store/abc-nixos/init"));
+    }
+    
+    #[test]
+    fn test_grub_config_with_dtb() {
+        let config = generate_grub_config("/NixOS", "loopback", Some("/nix/store/test-init"), true);
+        assert!(config.contains("devicetree /EFI/NixOS/device.dtb"));
+        assert!(config.contains("pd_ignore_unused"));
+        assert!(config.contains("clk_ignore_unused"));
     }
 }

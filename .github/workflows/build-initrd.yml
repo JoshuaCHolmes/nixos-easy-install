@@ -99,6 +99,9 @@ jobs:
           cp result/init-path dist/aarch64-x1e/
           cp result/platform dist/aarch64-x1e/
           cp result/default-device dist/aarch64-x1e/
+          cp result/dtb-name dist/aarch64-x1e/ || echo "no dtb-name"
+          cp result/device.dtb dist/aarch64-x1e/ || echo "no device.dtb"
+          cp -r result/dtbs dist/aarch64-x1e/ || echo "no dtbs dir"
           cp result/SHA256SUMS dist/aarch64-x1e/
           echo "Built for aarch64 (Snapdragon X1E):"
           ls -la dist/aarch64-x1e/

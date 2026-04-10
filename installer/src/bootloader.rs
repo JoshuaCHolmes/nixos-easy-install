@@ -41,6 +41,9 @@ pub struct BootFiles {
     /// NixOS installer initrd (optional, downloaded from release)
     pub initrd: Option<PathBuf>,
     
+    /// Device Tree Blob for ARM64 devices (optional, X1E only)
+    pub device_dtb: Option<PathBuf>,
+    
     /// Architecture (x86_64 or aarch64)
     pub arch: String,
 }
@@ -176,6 +179,10 @@ pub fn setup_bootloader(
     }
     if let Some(initrd) = &boot_files.initrd {
         copy_boot_file(initrd, &nixos_folder.join("initrd"), "NixOS initrd")?;
+    }
+    // Copy Device Tree Blob for ARM64 X1E (if provided)
+    if let Some(dtb) = &boot_files.device_dtb {
+        copy_boot_file(dtb, &nixos_folder.join("device.dtb"), "Device Tree Blob")?;
     }
     
     // Create UEFI boot entry

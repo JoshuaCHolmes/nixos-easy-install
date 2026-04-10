@@ -369,6 +369,7 @@ async fn download_boot_assets(config: &InstallConfig) -> Result<BootFiles> {
     // Detect architecture at runtime
     let platform = crate::assets::detect_platform();
     let arch = platform.base_arch();
+    let has_dtb = platform.needs_custom_kernel();
     
     info!("Detected platform: {} (arch: {})", platform.display_name(), arch);
     
@@ -394,7 +395,8 @@ async fn download_boot_assets(config: &InstallConfig) -> Result<BootFiles> {
     let grub_cfg_content = crate::assets::generate_grub_config(
         &nixos_root, 
         install_type,
-        installer_assets.init_path.as_deref()
+        installer_assets.init_path.as_deref(),
+        has_dtb
     );
     let grub_cfg_path = cache_dir.join("grub.cfg");
     std::fs::write(&grub_cfg_path, grub_cfg_content)?;
@@ -413,6 +415,7 @@ async fn download_boot_assets(config: &InstallConfig) -> Result<BootFiles> {
         grub_cfg: grub_cfg_path,
         kernel: Some(installer_assets.kernel),
         initrd: Some(installer_assets.initrd),
+        device_dtb: installer_assets.device_dtb,
         arch: arch.to_string(),
     })
 }

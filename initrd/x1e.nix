@@ -174,7 +174,7 @@ in {
   
   # Combined boot assets with x1e-specific DTB
   bootAssets = pkgs.runCommand "installer-boot-assets-x1e" {
-    nativeBuildInputs = [ pkgs.coreutils ];
+    nativeBuildInputs = [ pkgs.coreutils pkgs.findutils ];
   } ''
     mkdir -p $out
     
@@ -185,15 +185,32 @@ in {
     
     cp ${nixosSystem.config.system.build.initialRamdisk}/initrd $out/initrd
     
+    # Copy Device Tree Blob - REQUIRED for X1E hardware initialization
+    # The DTB tells the kernel about the specific hardware (display, USB, etc.)
+    mkdir -p $out/dtbs
+    if [ -d "${nixosSystem.config.hardware.deviceTree.package}/dtbs" ]; then
+      cp -r ${nixosSystem.config.hardware.deviceTree.package}/dtbs/* $out/dtbs/
+    fi
+    
+    # Also copy the specific DTB we need for Yoga Slim 7x
+    DTB_NAME="${nixosSystem.config.hardware.deviceTree.name}"
+    if [ -f "$out/dtbs/$DTB_NAME" ]; then
+      cp "$out/dtbs/$DTB_NAME" $out/device.dtb
+    fi
+    
     # Export the init path - required for booting NixOS
     echo "${nixosSystem.config.system.build.toplevel}/init" > $out/init-path
     
     # Export device info for the Windows installer
     echo "x1e" > $out/platform
     echo "lenovo-yoga-slim7x" > $out/default-device
+    echo "$DTB_NAME" > $out/dtb-name
     
     cd $out
     sha256sum bzImage initrd init-path platform default-device > SHA256SUMS
+    if [ -f device.dtb ]; then
+      sha256sum device.dtb >> SHA256SUMS
+    fi
   '';
   
   # Default is the toplevel for backwards compatibility
