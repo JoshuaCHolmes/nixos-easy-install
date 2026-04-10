@@ -806,7 +806,9 @@ fn parse_guid_to_bytes(guid: &str) -> Result<[u8; 16]> {
 
 fn parse_bcdedit_guid(output: &str) -> Result<String> {
     // Look for {xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}
-    let re = regex::Regex::new(r"\{[0-9a-fA-F-]+\}").unwrap();
+    // This regex pattern is known-good at compile time, so unwrap is safe
+    let re = regex::Regex::new(r"\{[0-9a-fA-F-]+\}")
+        .expect("valid regex pattern");
     
     re.find(output)
         .map(|m| m.as_str().to_string())

@@ -215,7 +215,7 @@ pub fn detect_snapdragon_x1e() -> bool {
             return false;
         }
         
-        // Check for Qualcomm processor via WMIC
+        // Primary detection: Check for Qualcomm/Snapdragon processor via WMIC
         if let Ok(output) = Command::new("wmic")
             .args(["cpu", "get", "name"])
             .output()
@@ -223,57 +223,52 @@ pub fn detect_snapdragon_x1e() -> bool {
             let stdout = String::from_utf8_lossy(&output.stdout);
             tracing::debug!("WMIC CPU Name: {}", stdout);
             
-            // Snapdragon X Elite variants
+            // Snapdragon X Elite/Plus variants (X1E80100, X1E78100, X1P64100, etc.)
             if stdout.contains("Snapdragon") && (
                 stdout.contains("X Elite") || 
                 stdout.contains("X1E") ||
-                stdout.contains("X Plus")
+                stdout.contains("X Plus") ||
+                stdout.contains("X1P")
             ) {
-                tracing::info!("Detected Snapdragon X Elite via CPU name");
+                tracing::info!("Detected Snapdragon X Elite via CPU name: {}", stdout.trim());
+                return true;
+            }
+            
+            // Also check for Qualcomm Oryon cores (the CPU architecture used in X Elite)
+            if stdout.contains("Qualcomm") && stdout.contains("Oryon") {
+                tracing::info!("Detected Qualcomm Oryon CPU (Snapdragon X series)");
                 return true;
             }
         }
         
-        // Check via Get-ComputerInfo PowerShell (more reliable for ARM)
+        // Fallback: Check via PowerShell (sometimes more reliable for ARM)
         if let Ok(output) = Command::new("powershell")
-            .args(["-Command", "Get-WmiObject -Class Win32_Processor | Select-Object -ExpandProperty Name"])
+            .args(["-NoProfile", "-Command", 
+                   "(Get-WmiObject -Class Win32_Processor).Name"])
             .output()
         {
             let stdout = String::from_utf8_lossy(&output.stdout);
             tracing::debug!("PowerShell CPU Name: {}", stdout);
             
-            if stdout.contains("Snapdragon") {
+            if stdout.contains("Snapdragon") && (
+                stdout.contains("X Elite") || 
+                stdout.contains("X Plus") ||
+                stdout.contains("X1E") ||
+                stdout.contains("X1P")
+            ) {
                 tracing::info!("Detected Snapdragon X Elite via PowerShell");
                 return true;
             }
         }
         
-        // Check for known Snapdragon X Elite devices by system model
-        if let Ok(output) = Command::new("wmic")
-            .args(["computersystem", "get", "model"])
-            .output()
-        {
-            let stdout = String::from_utf8_lossy(&output.stdout).to_lowercase();
-            tracing::debug!("WMIC System Model: {}", stdout);
-            
-            // Known Snapdragon X Elite devices
-            let x1e_models = [
-                "yoga slim 7x",
-                "thinkpad t14s gen 6",
-                "surface pro",   // Some Surface Pros have Snapdragon
-                "surface laptop", // Some Surface Laptops have Snapdragon
-                "83ed",          // Lenovo Yoga Slim 7x model code
-            ];
-            
-            for model in x1e_models {
-                if stdout.contains(model) {
-                    // Verify it's actually ARM by checking manufacturer
-                    tracing::info!("Detected potential Snapdragon device: {}", model);
-                    return true;
-                }
-            }
-        }
+        // Note: We don't use model-based detection because:
+        // 1. CPU name detection is more reliable
+        // 2. Model names like "Surface Pro" are ambiguous (both ARM and x86 variants exist)
+        // 3. We already verified ARM64 architecture above
         
+        // If we're on ARM64 but can't detect Snapdragon specifically, 
+        // log it for debugging but don't assume X1E
+        tracing::debug!("ARM64 detected but Snapdragon X Elite not confirmed via CPU name");
         false
     }
 }
