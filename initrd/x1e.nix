@@ -24,17 +24,28 @@ let
     if [ -f "$CONFIG_FILE" ]; then
       echo "Found installer configuration..."
       INSTALL_TYPE=$(jq -r '.install_type' "$CONFIG_FILE")
-      CONFIG_URL=$(jq -r '.config_url' "$CONFIG_FILE")
-      LOOPBACK_PATH=$(jq -r '.loopback_path // empty' "$CONFIG_FILE")
+      HOSTNAME=$(jq -r '.hostname' "$CONFIG_FILE")
+      USERNAME=$(jq -r '.username' "$CONFIG_FILE")
+      # Flake config - get URL from flake.url or flake config
+      FLAKE_TYPE=$(jq -r '.flake.type // "starter"' "$CONFIG_FILE")
+      CONFIG_URL=$(jq -r '.flake.url // empty' "$CONFIG_FILE")
+      FLAKE_HOSTNAME=$(jq -r '.flake.hostname // .hostname' "$CONFIG_FILE")
+      # Loopback config
+      LOOPBACK_TARGET=$(jq -r '.loopback.target_dir // empty' "$CONFIG_FILE")
+      LOOPBACK_SIZE=$(jq -r '.loopback.size_gb // 32' "$CONFIG_FILE")
       
       echo "Install type: $INSTALL_TYPE"
-      echo "Config URL: $CONFIG_URL"
+      echo "Hostname: $HOSTNAME"
+      echo "Flake type: $FLAKE_TYPE"
+      [ -n "$CONFIG_URL" ] && echo "Config URL: $CONFIG_URL"
       
-      if [ "$INSTALL_TYPE" = "loopback" ] && [ -n "$LOOPBACK_PATH" ]; then
-        echo "Loopback path: $LOOPBACK_PATH"
+      if [ "$INSTALL_TYPE" = "loopback" ] && [ -n "$LOOPBACK_TARGET" ]; then
+        echo "Loopback target: $LOOPBACK_TARGET"
         
         # Mount the NTFS partition and setup the loopback
-        # Note: Path like C:/NixOS means the C: partition
+        # Note: Path like C:\NixOS or C:/NixOS means the C: partition
+        # Convert backslashes to forward slashes and extract drive letter
+        LOOPBACK_PATH=$(echo "$LOOPBACK_TARGET" | sed 's|\\|/|g')
         DRIVE_LETTER=$(echo "$LOOPBACK_PATH" | cut -d: -f1)
         echo "Looking for Windows drive: $DRIVE_LETTER"
         
@@ -112,6 +123,15 @@ let
       # Boot - minimal config for initrd-based installer
       boot.loader.grub.enable = false;
       boot.loader.systemd-boot.enable = false;
+      
+      # X1E-specific kernel parameters - prevent clock/power domain shutdown
+      # before drivers load (display, USB, etc. won't initialize without these)
+      # These are also passed via GRUB, but having them here ensures they're
+      # available if the system is booted via other means
+      boot.kernelParams = [
+        "pd_ignore_unused"
+        "clk_ignore_unused"
+      ];
       
       # Dummy root filesystem (required by NixOS, but we're running from initrd)
       fileSystems."/" = {

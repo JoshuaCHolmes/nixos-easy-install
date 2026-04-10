@@ -839,8 +839,15 @@ pub fn generate_grub_config(nixos_root: &str, install_type: &str, init_path: Opt
     }
     
     // For loopback install, we pass the disk location as kernel parameter
+    // Quote the path in case it contains spaces
     if install_type == "loopback" || install_type == "quick" {
-        params.push(format!("nixos.loopback={}/root.disk", nixos_root.replace("\\", "/")));
+        let loopback_path = format!("{}/root.disk", nixos_root.replace("\\", "/"));
+        // GRUB kernel params with spaces need quoting
+        if loopback_path.contains(' ') {
+            params.push(format!("nixos.loopback=\"{}\"", loopback_path));
+        } else {
+            params.push(format!("nixos.loopback={}", loopback_path));
+        }
     }
     
     // X1E kernel parameters for Snapdragon hardware
