@@ -440,22 +440,41 @@ pub fn download_installer_assets_for_platform(cache_dir: &Path, platform: Hardwa
         device_dtb: None,
     };
     
-    // Check cache - but verify platform matches
+    // Check cache - but verify platform matches AND required files exist
     if assets.kernel.exists() && assets.initrd.exists() && init_path_file.exists() {
         let cached_platform = fs::read_to_string(&platform_file).ok().map(|s| s.trim().to_string());
         
+        // For X1E platforms, DTB must also exist in cache
+        let dtb_required = platform.needs_custom_kernel();
+        let dtb_present = dtb_file.exists();
+        
         // If platform matches (or no platform file exists for older cache), use cache
-        if cached_platform.as_deref() == Some(arch_str) || (cached_platform.is_none() && !platform.needs_custom_kernel()) {
+        // But for X1E, also require DTB to be present
+        let cache_valid = if cached_platform.as_deref() == Some(arch_str) {
+            // Platform matches - for X1E, also need DTB
+            !dtb_required || dtb_present
+        } else if cached_platform.is_none() && !platform.needs_custom_kernel() {
+            // Old cache without platform file, but we're not X1E so it's ok
+            true
+        } else {
+            false
+        };
+        
+        if cache_valid {
             assets.init_path = fs::read_to_string(&init_path_file).ok().map(|s| s.trim().to_string());
             assets.platform = cached_platform;
             // Check for DTB (X1E only)
-            if dtb_file.exists() {
+            if dtb_present {
                 assets.device_dtb = Some(dtb_file);
             }
             info!("Using cached installer boot files");
             return Ok(assets);
         } else {
-            info!("Platform changed from {:?} to {}, re-downloading...", cached_platform, arch_str);
+            if dtb_required && !dtb_present {
+                info!("Cache missing required DTB for {}, re-downloading...", platform.display_name());
+            } else {
+                info!("Platform changed from {:?} to {}, re-downloading...", cached_platform, arch_str);
+            }
             // Clear stale cache completely
             let _ = fs::remove_file(&assets.kernel);
             let _ = fs::remove_file(&assets.initrd);

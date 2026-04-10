@@ -207,26 +207,17 @@ pub fn setup_bootloader(
     
     // Create UEFI boot entry
     info!("Creating UEFI boot entry...");
-    let arch = crate::assets::detect_arch();
-    let boot_entry_id = if arch == "aarch64" {
-        // On ARM64, use direct UEFI NVRAM writes as bcdedit doesn't work properly
-        create_uefi_boot_entry_direct(esp, &nixos_folder.join(shim_name), display_name)?
-    } else {
-        // On x86_64, bcdedit works fine
-        create_boot_entry(&nixos_folder.join(shim_name), display_name)?
-    };
+    // Use direct UEFI NVRAM writes for both x86_64 and ARM64
+    // bcdedit creates Windows Boot Manager entries, not UEFI firmware entries
+    // which causes 0xc000007b errors when loading EFI shim
+    let boot_entry_id = create_uefi_boot_entry_direct(esp, &nixos_folder.join(shim_name), display_name)?;
     
-    // Verify the boot entry was actually created
-    let verified = if arch == "aarch64" {
-        // For ARM64, verify by reading BootOrder from NVRAM
-        verify_uefi_boot_entry(&boot_entry_id).unwrap_or_else(|e| {
-            warn!("Could not verify ARM64 boot entry: {}", e);
-            // Assume success if we can't verify - the create call succeeded
-            true
-        })
-    } else {
-        verify_boot_entry(&boot_entry_id)?
-    };
+    // Verify the boot entry was actually created by reading BootOrder from NVRAM
+    let verified = verify_uefi_boot_entry(&boot_entry_id).unwrap_or_else(|e| {
+        warn!("Could not verify boot entry: {}", e);
+        // Assume success if we can't verify - the create call succeeded
+        true
+    });
     
     if !verified {
         // Try to clean up the files we copied
@@ -245,22 +236,9 @@ pub fn setup_bootloader(
 }
 
 /// Verify that a boot entry exists in bcdedit
-fn verify_boot_entry(entry_id: &str) -> Result<bool> {
-    use std::process::Command;
-    
-    let output = Command::new("bcdedit")
-        .args(["/enum", "all"])
-        .output()
-        .context("Failed to run bcdedit /enum")?;
-    
-    let output_str = String::from_utf8_lossy(&output.stdout);
-    Ok(output_str.contains(entry_id))
-}
-
 /// Verify that a UEFI boot entry exists by checking BootOrder
 /// 
-/// For ARM64, we can't use bcdedit, so we read back the BootOrder variable
-/// and verify our entry number is present.
+/// We read back the BootOrder variable and verify our entry number is present.
 #[cfg(target_os = "windows")]
 fn verify_uefi_boot_entry(entry_id: &str) -> Result<bool> {
     // Entry ID is like "Boot0001" - extract the number
@@ -280,185 +258,6 @@ fn verify_uefi_boot_entry(entry_id: &str) -> Result<bool> {
 fn verify_uefi_boot_entry(_entry_id: &str) -> Result<bool> {
     // Can't verify on non-Windows
     Ok(true)
-}
-
-/// Create UEFI boot entry using direct NVRAM writes
-/// 
-/// We use direct NVRAM access for both x86_64 and ARM64 because:
-/// 1. bcdedit creates Windows Boot Manager entries, not UEFI firmware entries
-/// 2. Shim needs to be loaded by UEFI firmware, not Windows Boot Manager
-/// 3. This is the same approach Linux uses (efibootmgr)
-/// 
-/// SAFETY:
-/// - Only ADDS a new entry, never modifies existing
-/// - NixOS is placed first in BootOrder for convenience
-fn create_boot_entry(efi_path: &Path, display_name: &str) -> Result<String> {
-    // For UEFI shim, we need a firmware boot entry, not a Windows Boot Manager entry
-    // bcdedit creates WBM entries which causes 0xc000007b errors when loading EFI apps
-    create_uefi_boot_entry_direct_x86(efi_path, display_name)
-}
-
-/// Create UEFI boot entry on x86_64 by writing directly to NVRAM
-/// 
-/// This mirrors the ARM64 approach but uses the x86_64 path format
-#[cfg(target_os = "windows")]
-fn create_uefi_boot_entry_direct_x86(efi_path: &Path, display_name: &str) -> Result<String> {
-    use std::process::Command;
-    
-    let path_str = efi_path.to_string_lossy();
-    let drive_letter = path_str.chars().next().unwrap_or('S');
-    
-    // Get ESP disk and partition info for UEFI path
-    // We need the disk signature and partition start for the UEFI device path
-    
-    // For x86_64, we can still use bcdedit to query disk info, then write NVRAM directly
-    // Or we can try a simpler approach: add via the {fwbootmgr} route
-    
-    // First, let's try creating a proper firmware boot entry using bcdedit's firmware store
-    // bcdedit /set {fwbootmgr} ... doesn't create new entries, but we can use /copy
-    
-    // Actually, the cleanest approach is to use the Windows.Devices.Enumeration API
-    // or call out to a helper. For now, let's use a PowerShell approach that
-    // properly creates UEFI NVRAM entries.
-    
-    // Use PowerShell to get the ESP partition GUID and create UEFI boot entry
-    let ps_script = format!(r#"
-$ErrorActionPreference = 'Stop'
-
-# Get ESP partition info
-$esp = Get-Partition | Where-Object {{ $_.DriveLetter -eq '{drive}' }}
-if (-not $esp) {{ throw "Cannot find ESP partition {drive}:" }}
-
-$disk = Get-Disk -Number $esp.DiskNumber
-$diskPath = $disk.Path
-
-# Get the relative path from ESP root
-$efiPath = '{path}'
-$relativePath = $efiPath.Substring(2)  # Remove drive letter
-
-# Use bcdedit to create a proper firmware boot entry
-# First, try to find an unused Boot number
-$output = & bcdedit /enum firmware
-$usedNums = [regex]::Matches($output, 'identifier\s+{{bootmgr}}') | ForEach-Object {{ $_ }}
-
-# Create the entry in firmware boot manager context
-$createOutput = & bcdedit /create /d '{name}' /application osloader 2>&1
-if ($LASTEXITCODE -ne 0) {{
-    # Try firmware application type
-    $createOutput = & bcdedit /copy '{{fwbootmgr}}' /d '{name}' 2>&1
-    if ($LASTEXITCODE -ne 0) {{
-        throw "Failed to create boot entry: $createOutput"
-    }}
-}}
-
-# Extract GUID
-if ($createOutput -match '{{[^}}]+}}') {{
-    $guid = $Matches[0]
-}} else {{
-    throw "Could not parse GUID from: $createOutput"
-}}
-
-# Set device to ESP partition
-& bcdedit /set $guid device "partition={drive}:" | Out-Null
-& bcdedit /set $guid path $relativePath | Out-Null
-
-# Add to firmware display order (first position for convenience)
-& bcdedit /set '{{fwbootmgr}}' displayorder $guid /addfirst 2>&1 | Out-Null
-
-Write-Output $guid
-"#, drive = drive_letter, path = path_str, name = display_name);
-
-    let output = Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &ps_script])
-        .output()
-        .context("Failed to run PowerShell to create boot entry")?;
-    
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        warn!("PowerShell boot entry creation failed: stdout={}, stderr={}", stdout, stderr);
-        
-        // Fall back to simple bcdedit approach (may not work for all systems)
-        return create_boot_entry_fallback(efi_path, display_name);
-    }
-    
-    let guid = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if guid.is_empty() || !guid.starts_with('{') {
-        warn!("Invalid GUID returned: '{}', falling back", guid);
-        return create_boot_entry_fallback(efi_path, display_name);
-    }
-    
-    info!("Created UEFI firmware boot entry: {}", guid);
-    Ok(guid)
-}
-
-#[cfg(not(target_os = "windows"))]
-fn create_uefi_boot_entry_direct_x86(_efi_path: &Path, _display_name: &str) -> Result<String> {
-    bail!("UEFI boot entry creation is only supported on Windows")
-}
-
-/// Fallback boot entry creation using simple bcdedit
-/// This creates a Windows Boot Manager entry which may not work for all EFI apps
-fn create_boot_entry_fallback(efi_path: &Path, display_name: &str) -> Result<String> {
-    use std::process::Command;
-    
-    let path_str = efi_path.to_string_lossy();
-    let relative_path = if path_str.len() > 2 && path_str.chars().nth(1) == Some(':') {
-        &path_str[2..]
-    } else {
-        &path_str
-    };
-    let drive_letter = path_str.chars().next().unwrap_or('S');
-    
-    warn!("Using fallback boot entry creation - this may not work for UEFI shim");
-    
-    // Create firmware boot option  
-    let output = Command::new("bcdedit")
-        .args([
-            "/create", 
-            "/d", display_name,
-            "/application", "bootsector"
-        ])
-        .output()
-        .context("Failed to create boot entry")?;
-    
-    let output_str = if output.status.success() {
-        String::from_utf8_lossy(&output.stdout).to_string()
-    } else {
-        // Last resort: try as a copy of the firmware boot manager
-        let output = Command::new("bcdedit")
-            .args(["/copy", "{fwbootmgr}", "/d", display_name])
-            .output()
-            .context("bcdedit /copy failed")?;
-        
-        if !output.status.success() {
-            bail!(
-                "All bcdedit methods failed. You may need to add boot entry manually.\n\
-                Error: {}", 
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-        
-        String::from_utf8_lossy(&output.stdout).to_string()
-    };
-    
-    let guid = parse_bcdedit_guid(&output_str)?;
-    
-    // Configure the entry
-    let _ = Command::new("bcdedit")
-        .args(["/set", &guid, "device", &format!("partition={}:", drive_letter)])
-        .output();
-    
-    let _ = Command::new("bcdedit")
-        .args(["/set", &guid, "path", relative_path])
-        .output();
-    
-    // Add to firmware menu
-    let _ = Command::new("bcdedit")
-        .args(["/set", "{fwbootmgr}", "displayorder", &guid, "/addfirst"])
-        .output();
-    
-    Ok(guid)
 }
 
 /// Create UEFI boot entry by writing directly to NVRAM variables
