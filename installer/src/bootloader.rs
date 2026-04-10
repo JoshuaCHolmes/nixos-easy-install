@@ -557,7 +557,9 @@ fn read_boot_order() -> Result<Vec<u16>> {
     let var_name: Vec<u16> = "BootOrder\0".encode_utf16().collect();
     let guid_name: Vec<u16> = EFI_GLOBAL_GUID.encode_utf16().chain(std::iter::once(0)).collect();
     
-    let mut buffer = vec![0u8; 512]; // BootOrder is small
+    // BootOrder is typically small (max ~128 entries = 256 bytes) but allocate more to be safe
+    // UEFI spec doesn't define max, but systems rarely have more than a few dozen boot entries
+    let mut buffer = vec![0u8; 1024];
     
     let size = unsafe {
         GetFirmwareEnvironmentVariableW(
@@ -572,6 +574,11 @@ fn read_boot_order() -> Result<Vec<u16>> {
         // No BootOrder exists, return empty
         debug!("No existing BootOrder found");
         return Ok(Vec::new());
+    }
+    
+    // Check if we hit the buffer limit (unlikely but possible)
+    if size as usize >= buffer.len() {
+        warn!("BootOrder may have been truncated ({} bytes) - system has many boot entries", size);
     }
     
     // Validate BootOrder size is even (array of u16)

@@ -257,12 +257,57 @@ async fn install_inner(
     state: &mut InstallState,
 ) -> Result<()> {
     
-    // Step 1: Final validation
-    progress(0.05, "Validating system requirements...");
+    // =========================================================================
+    // PHASE 1: ALL PREFLIGHT CHECKS (no changes made yet)
+    // =========================================================================
+    
+    progress(0.02, "Running preflight checks...");
+    
+    // Validate system hardware requirements
     validate_system(system_info)?;
     
-    // Step 2: Prepare storage
-    progress(0.10, "Preparing storage...");
+    // Validate ESP access BEFORE we make any changes
+    let esp = system_info.esp.as_ref()
+        .context("No EFI System Partition found")?;
+    let bootloader_preflight = crate::bootloader::preflight_check(esp)?;
+    if !bootloader_preflight.passed {
+        bail!("ESP preflight failed: {}", bootloader_preflight.errors.join(", "));
+    }
+    
+    // Validate loopback storage BEFORE we create files
+    if config.install_type == "loopback" || config.install_type == "quick" {
+        if let Some(ref loopback) = config.loopback {
+            let loopback_cfg = crate::loopback::LoopbackConfig {
+                target_dir: std::path::PathBuf::from(&loopback.target_dir),
+                size_gb: loopback.size_gb,
+                separate_home: false,
+                home_size_gb: None,
+            };
+            let loopback_preflight = crate::loopback::preflight_check(&loopback_cfg)?;
+            if !loopback_preflight.passed {
+                bail!("Storage preflight failed: {}", loopback_preflight.errors.join(", "));
+            }
+        }
+    }
+    
+    // Validate config (hostname, username, etc.)
+    validate_config(config)?;
+    
+    info!("All preflight checks passed - proceeding with installation");
+    
+    // =========================================================================
+    // PHASE 2: DOWNLOAD ASSETS (reversible - just cache files)
+    // =========================================================================
+    
+    progress(0.10, "Downloading NixOS boot files...");
+    let boot_files = download_boot_assets(config).await?;
+    
+    // =========================================================================
+    // PHASE 3: MAKE CHANGES (point of no return)
+    // =========================================================================
+    
+    // Step 1: Prepare storage
+    progress(0.30, "Preparing storage...");
     match config.install_type.as_str() {
         "loopback" | "quick" => {
             let result = prepare_loopback(config, progress).await?;
@@ -274,32 +319,80 @@ async fn install_inner(
         _ => anyhow::bail!("Unknown install type: {}", config.install_type),
     }
     
-    // Step 3: Download boot assets
-    progress(0.30, "Downloading NixOS boot files...");
-    let boot_files = download_boot_assets(config).await?;
-    
-    // Step 4: Set up bootloader
+    // Step 2: Set up bootloader (ESP already verified in preflight)
     progress(0.50, "Setting up bootloader...");
-    let esp = system_info.esp.as_ref()
-        .context("No EFI System Partition found")?;
-    
     let bootloader_result = setup_bootloader(esp, &boot_files)?;
     state.esp_folder = Some(bootloader_result.esp_folder.clone());
     state.bootloader_result = Some(bootloader_result.clone());
     
-    // Step 5: Install OS switching utilities
+    // Step 3: Install OS switching utilities
     progress(0.60, "Installing switching utilities...");
     install_switching_utils(config, &bootloader_result)?;
     
-    // Step 6: Write install configuration
+    // Step 4: Write install configuration
     progress(0.70, "Writing installation configuration...");
     write_install_config(config, esp)?;
     
-    // Step 7: Final verification
+    // =========================================================================
+    // PHASE 4: VERIFICATION
+    // =========================================================================
+    
     progress(0.90, "Verifying installation...");
     verify_setup(state)?;
     
     progress(1.0, "Ready to reboot!");
+    
+    Ok(())
+}
+
+/// Validate the install configuration
+fn validate_config(config: &InstallConfig) -> Result<()> {
+    // Validate hostname
+    if config.hostname.is_empty() {
+        bail!("Hostname cannot be empty");
+    }
+    if config.hostname.len() > 63 {
+        bail!("Hostname too long (max 63 characters)");
+    }
+    // Simple hostname validation - alphanumeric and hyphens
+    if !config.hostname.chars().all(|c| c.is_alphanumeric() || c == '-') {
+        bail!("Hostname contains invalid characters (only alphanumeric and hyphens allowed)");
+    }
+    if config.hostname.starts_with('-') || config.hostname.ends_with('-') {
+        bail!("Hostname cannot start or end with a hyphen");
+    }
+    
+    // Validate username
+    if config.username.is_empty() {
+        bail!("Username cannot be empty");
+    }
+    if config.username.len() > 32 {
+        bail!("Username too long (max 32 characters)");
+    }
+    // Unix username validation
+    if !config.username.chars().next().map(|c| c.is_ascii_lowercase()).unwrap_or(false) {
+        bail!("Username must start with a lowercase letter");
+    }
+    if !config.username.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-') {
+        bail!("Username contains invalid characters (only lowercase, digits, underscore, hyphen allowed)");
+    }
+    
+    // Validate loopback config
+    if config.install_type == "loopback" || config.install_type == "quick" {
+        if let Some(ref loopback) = config.loopback {
+            if loopback.size_gb < 8 {
+                bail!("Disk size too small (minimum 8 GB)");
+            }
+            if loopback.size_gb > 2048 {
+                bail!("Disk size too large (maximum 2 TB)");
+            }
+            if loopback.target_dir.is_empty() {
+                bail!("Target directory cannot be empty");
+            }
+        } else {
+            bail!("Loopback configuration required for loopback/quick install");
+        }
+    }
     
     Ok(())
 }
@@ -547,6 +640,15 @@ fn cleanup(state: &InstallState) -> Result<()> {
     if let (Some(ref esp_folder), Some(ref bootloader)) = (&state.esp_folder, &state.bootloader_result) {
         if let Err(e) = crate::bootloader::remove_bootloader(esp_folder, &bootloader.boot_entry_id) {
             warn!("Failed to cleanup bootloader: {}", e);
+        }
+    }
+    
+    // Clean up download cache (boot assets in temp directory)
+    let cache_dir = std::env::temp_dir().join("nixos-install").join("boot-assets");
+    if cache_dir.exists() {
+        info!("Cleaning up download cache at {:?}", cache_dir);
+        if let Err(e) = std::fs::remove_dir_all(&cache_dir) {
+            warn!("Failed to cleanup download cache: {}", e);
         }
     }
     

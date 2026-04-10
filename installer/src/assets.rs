@@ -333,15 +333,22 @@ pub fn download_boot_assets_for_arch(cache_dir: &Path, arch: &str) -> Result<Boo
         (SHIM_SIGNED_URL_X64, GRUB_SIGNED_URL_X64, "grubx64.efi.signed")
     };
     
-    // Download shim-signed
+    // Get checksums for verification
+    let (shim_sha256, grub_sha256) = if base_arch == "aarch64" {
+        (SHIM_SIGNED_SHA256_AA64, GRUB_SIGNED_SHA256_AA64)
+    } else {
+        (SHIM_SIGNED_SHA256_X64, GRUB_SIGNED_SHA256_X64)
+    };
+    
+    // Download shim-signed with checksum verification
     info!("Downloading shim-signed package for {}...", base_arch);
-    let shim_deb = download_file(shim_url, cache_dir, "shim-signed.deb")?;
+    let shim_deb = download_file_with_checksum(shim_url, cache_dir, "shim-signed.deb", Some(shim_sha256))?;
     extract_deb_efi_files(&shim_deb, cache_dir, &[shim_name, mm_name, fb_name])?;
     fs::remove_file(&shim_deb)?;
     
-    // Download grub-signed
-    info!("Downloading grub-signed package for {}...", arch);
-    let grub_deb = download_file(grub_url, cache_dir, "grub-signed.deb")?;
+    // Download grub-signed with checksum verification
+    info!("Downloading grub-signed package for {}...", base_arch);
+    let grub_deb = download_file_with_checksum(grub_url, cache_dir, "grub-signed.deb", Some(grub_sha256))?;
     extract_deb_efi_files(&grub_deb, cache_dir, &[grub_signed_name])?;
     fs::remove_file(&grub_deb)?;
     
