@@ -1030,4 +1030,26 @@ mod tests {
         assert!(config.contains("pd_ignore_unused"));
         assert!(config.contains("clk_ignore_unused"));
     }
+    
+    #[test]
+    fn test_platform_detection_logic() {
+        // Test that X1E platforms require DTB
+        assert!(HardwarePlatform::SnapdragonX1E.needs_custom_kernel());
+        assert!(!HardwarePlatform::X86_64.needs_custom_kernel());
+        assert!(!HardwarePlatform::Aarch64.needs_custom_kernel());
+    }
+    
+    #[test]
+    fn test_platform_arch_strings() {
+        assert_eq!(HardwarePlatform::SnapdragonX1E.arch_string(), "aarch64-x1e");
+        assert_eq!(HardwarePlatform::Aarch64.arch_string(), "aarch64");
+        assert_eq!(HardwarePlatform::X86_64.arch_string(), "x86_64");
+    }
+    
+    #[test]
+    fn test_platform_base_arch() {
+        assert_eq!(HardwarePlatform::SnapdragonX1E.base_arch(), "aarch64");
+        assert_eq!(HardwarePlatform::Aarch64.base_arch(), "aarch64");
+        assert_eq!(HardwarePlatform::X86_64.base_arch(), "x86_64");
+    }
 }

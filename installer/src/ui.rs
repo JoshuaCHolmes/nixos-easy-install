@@ -1338,6 +1338,20 @@ impl InstallerApp {
             }
         }
         
+        // Clean download cache
+        let cache_dir = std::env::temp_dir().join("nixos-install");
+        if cache_dir.exists() {
+            match std::fs::remove_dir_all(&cache_dir) {
+                Ok(()) => {
+                    self.cleanup_results.push("Cleared download cache".to_string());
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to clear download cache: {}", e);
+                    // Don't set error - this is non-critical
+                }
+            }
+        }
+        
         self.cleanup_status = None;
     }
 }
