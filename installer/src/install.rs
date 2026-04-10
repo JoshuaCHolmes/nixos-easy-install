@@ -364,9 +364,9 @@ fn validate_config(config: &InstallConfig) -> Result<()> {
     if config.hostname.len() > 63 {
         bail!("Hostname too long (max 63 characters)");
     }
-    // Simple hostname validation - alphanumeric and hyphens
-    if !config.hostname.chars().all(|c| c.is_alphanumeric() || c == '-') {
-        bail!("Hostname contains invalid characters (only alphanumeric and hyphens allowed)");
+    // Simple hostname validation - ASCII alphanumeric and hyphens only
+    if !config.hostname.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        bail!("Hostname contains invalid characters (only ASCII letters, numbers, and hyphens allowed)");
     }
     if config.hostname.starts_with('-') || config.hostname.ends_with('-') {
         bail!("Hostname cannot start or end with a hyphen");
@@ -379,19 +379,19 @@ fn validate_config(config: &InstallConfig) -> Result<()> {
     if config.username.len() > 32 {
         bail!("Username too long (max 32 characters)");
     }
-    // Unix username validation
+    // Unix username validation - lowercase, digits, underscore only (no hyphens per POSIX)
     if !config.username.chars().next().map(|c| c.is_ascii_lowercase()).unwrap_or(false) {
         bail!("Username must start with a lowercase letter");
     }
-    if !config.username.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-') {
-        bail!("Username contains invalid characters (only lowercase, digits, underscore, hyphen allowed)");
+    if !config.username.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') {
+        bail!("Username contains invalid characters (only lowercase letters, digits, and underscores allowed)");
     }
     
     // Validate loopback config
     if config.install_type == "loopback" || config.install_type == "quick" {
         if let Some(ref loopback) = config.loopback {
-            if loopback.size_gb < 8 {
-                bail!("Disk size too small (minimum 8 GB)");
+            if loopback.size_gb < 10 {
+                bail!("Disk size too small (minimum 10 GB)");
             }
             if loopback.size_gb > 2048 {
                 bail!("Disk size too large (maximum 2 TB)");

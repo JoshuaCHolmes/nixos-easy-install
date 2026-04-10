@@ -684,6 +684,53 @@ FLAKE
         git -C "$FLAKE_DIR" add -A
         git -C "$FLAKE_DIR" commit -m "Initial NixOS configuration for $HOSTNAME"
         
+        # Add README
+        cat > "$FLAKE_DIR/README.md" << 'README'
+# NixOS Configuration
+
+This configuration was created by NixOS Easy Install based on the starter template.
+
+## Quick Start
+
+After logging in, you can:
+
+1. **Edit your configuration**:
+   ```bash
+   sudo nano /etc/nixos/configuration.nix
+   ```
+
+2. **Rebuild your system** after making changes:
+   ```bash
+   sudo nixos-rebuild switch
+   ```
+
+3. **Publish your config to GitHub** (to reuse on other machines):
+   ```bash
+   nixos-config-publish git@github.com:YOUR_USERNAME/my-nixos-config.git
+   ```
+
+## Configuration Structure
+
+- `flake.nix` - Flake definition with inputs (nixpkgs, home-manager, etc.)
+- `modules/common.nix` - Shared configuration for all hosts
+- `hosts/<hostname>/` - Host-specific configuration and hardware
+- `home/` - Home-manager configuration for user environment
+
+## Adding Another Machine
+
+1. Run NixOS Easy Install on the new machine with "Custom URL" pointing to your repo
+2. The installer will detect your config structure and add a new host entry
+3. Commit and push the changes
+
+## Need Help?
+
+- NixOS Manual: https://nixos.org/manual/nixos/stable/
+- NixOS Wiki: https://nixos.wiki/
+- NixOS Discourse: https://discourse.nixos.org/
+README
+        git -C "$FLAKE_DIR" add README.md
+        git -C "$FLAKE_DIR" commit --amend -m "Initial NixOS configuration for $HOSTNAME"
+        
         log "Starter config customized: hostname=$HOSTNAME, user=$USERNAME"
         log "Config initialized as fresh git repo (no upstream tracking)"
         # Hardware config will be handled in the integration section below
@@ -756,6 +803,50 @@ FLAKE
   system.stateVersion = "24.11";
 }
 CONF
+
+        # Add README for minimal config
+        cat > "$FLAKE_DIR/README.md" << 'README'
+# NixOS Minimal Configuration
+
+This is a minimal NixOS configuration created by NixOS Easy Install.
+
+## Quick Start
+
+1. **Edit your configuration**:
+   ```bash
+   sudo nano /etc/nixos/configuration.nix
+   ```
+
+2. **Rebuild your system** after making changes:
+   ```bash
+   sudo nixos-rebuild switch
+   ```
+
+3. **Publish your config to GitHub** (to reuse on other machines):
+   ```bash
+   nixos-config-publish git@github.com:YOUR_USERNAME/my-nixos-config.git
+   ```
+
+## Files
+
+- `flake.nix` - Simple flake with just nixpkgs input
+- `configuration.nix` - Your system configuration
+- `hardware-configuration.nix` - Auto-generated (don't edit)
+
+## Next Steps
+
+Consider upgrading to the full starter config for:
+- Home-manager integration (user dotfiles as Nix)
+- Modular configuration structure
+- Multi-machine support
+
+See: https://github.com/JoshuaCHolmes/nixos-starter-config
+README
+
+        # Initialize git for minimal config too
+        git -C "$FLAKE_DIR" init
+        git -C "$FLAKE_DIR" add -A
+        git -C "$FLAKE_DIR" commit -m "Initial minimal NixOS configuration for $HOSTNAME"
         ;;
         
       url)
