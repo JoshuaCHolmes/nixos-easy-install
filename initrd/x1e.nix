@@ -606,7 +606,9 @@ let
       systemd.services.nixos-easy-installer = {
         description = "NixOS Easy Install (Snapdragon X Elite)";
         wantedBy = [ "multi-user.target" ];
-        after = [ "network.target" ];
+        # Don't wait for network - it may take forever on X1E without firmware
+        # The installer will handle network connectivity itself if needed
+        after = [ "systemd-vconsole-setup.service" ];
         serviceConfig = {
           Type = "oneshot";
           ExecStart = "${installerScript}/bin/nixos-easy-installer";
@@ -633,8 +635,9 @@ let
         usbutils
       ];
       
-      # Enable networking
+      # Enable networking (but don't block boot waiting for it)
       networking.networkmanager.enable = true;
+      systemd.services.NetworkManager-wait-online.enable = false;
       
       # Console setup
       console = {

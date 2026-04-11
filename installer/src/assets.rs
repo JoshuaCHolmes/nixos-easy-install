@@ -895,6 +895,9 @@ pub fn generate_grub_config(nixos_root: &str, install_type: &str, init_path: Opt
     if has_dtb {
         params.push("pd_ignore_unused".to_string());
         params.push("clk_ignore_unused".to_string());
+        // Force console to tty1 - without this, systemd may pick UART as console
+        // and not display anything on screen (issue with Yoga Slim 7x)
+        params.push("console=tty1".to_string());
     }
     
     let kernel_params = params.join(" ");
