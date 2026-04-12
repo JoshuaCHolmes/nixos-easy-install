@@ -3,7 +3,7 @@
 # This uses the x1e-nixos-config kernel and modules which have proper support
 # for Qualcomm Snapdragon X Elite SoCs.
 
-{ pkgs, x1e-nixos-config }:
+{ pkgs, lib ? pkgs.lib, x1e-nixos-config }:
 
 let
   # Full installer script - mirrors default.nix but with X1E-specific handling
@@ -566,10 +566,11 @@ SCRIPT
 
 in
 let
-  # Build a NixOS system with x1e support
+  # Build a NixOS system with x1e support using netboot profile
+  # The netboot profile sets up squashfs/overlayfs properly for RAM-based boot
   nixosSystem = pkgs.nixos {
     imports = [
-      "${pkgs.path}/nixos/modules/profiles/minimal.nix"
+      "${pkgs.path}/nixos/modules/installer/netboot/netboot-minimal.nix"
       # Import x1e module for Snapdragon X Elite support
       x1e-nixos-config.nixosModules.x1e
     ];
@@ -594,13 +595,6 @@ let
         "pd_ignore_unused"
         "clk_ignore_unused"
       ];
-      
-      # Dummy root filesystem (required by NixOS, but we're running from initrd)
-      fileSystems."/" = {
-        device = "none";
-        fsType = "tmpfs";
-        options = [ "mode=0755" ];
-      };
       
       # Run installer on boot
       systemd.services.nixos-easy-installer = {
@@ -636,7 +630,8 @@ let
       ];
       
       # Enable networking (but don't block boot waiting for it)
-      networking.networkmanager.enable = true;
+      # Override netboot-minimal's default of disabling networkmanager
+      networking.networkmanager.enable = lib.mkForce true;
       systemd.services.NetworkManager-wait-online.enable = false;
       
       # Console setup
@@ -655,7 +650,8 @@ in {
   
   # Individual components
   kernel = nixosSystem.config.system.build.kernel;
-  initrd = nixosSystem.config.system.build.initialRamdisk;
+  # Use netboot ramdisk which includes squashfs store
+  initrd = nixosSystem.config.system.build.netbootRamdisk;
   
   # Combined boot assets with x1e-specific DTB
   bootAssets = pkgs.runCommand "installer-boot-assets-x1e" {
@@ -668,7 +664,10 @@ in {
       cp ${nixosSystem.config.system.build.kernel}/Image $out/bzImage 2>/dev/null || \
       cp ${nixosSystem.config.system.build.kernel}/bzImage $out/bzImage
     
-    cp ${nixosSystem.config.system.build.initialRamdisk}/initrd $out/initrd
+    # Use netbootRamdisk which includes squashfs - this is critical!
+    # The netboot initrd contains the squashfs of /nix/store, which is required
+    # for the system to find /init after booting
+    cp ${nixosSystem.config.system.build.netbootRamdisk}/initrd $out/initrd
     
     # Copy Device Tree Blob - REQUIRED for X1E hardware initialization
     # The DTB tells the kernel about the specific hardware (display, USB, etc.)
