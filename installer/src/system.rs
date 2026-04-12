@@ -448,6 +448,15 @@ pub fn validate_requirements(info: &SystemInfo) -> ValidationResult {
         warnings.push("Legacy BIOS detected. UEFI is recommended.".to_string());
     }
     
+    // Check Secure Boot - warn that it may cause issues
+    if info.secure_boot_enabled {
+        warnings.push(
+            "Secure Boot is enabled. If NixOS fails to boot, you may need to: \
+             (1) Disable Secure Boot in BIOS, or \
+             (2) Enroll the MOK key when prompted by MokManager on first boot.".to_string()
+        );
+    }
+    
     // Check ESP exists and has enough space for boot assets
     // Required space is calculated dynamically based on actual asset sizes
     if info.is_uefi {

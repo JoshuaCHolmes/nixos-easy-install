@@ -283,11 +283,12 @@ fn create_uefi_boot_entry_direct(esp: &EspInfo, efi_path: &Path, description: &s
     let boot_num = find_next_boot_number(&boot_order);
     let boot_var_name = format!("Boot{:04X}", boot_num);
     
-    info!("Creating boot entry {} for ARM64 device", boot_var_name);
+    info!("Creating UEFI boot entry {} via direct NVRAM write", boot_var_name);
+    debug!("Current BootOrder: {:04X?}", boot_order);
     
-    // Get the ESP partition GUID for the device path
     // Get the ESP partition GUID and number for the device path
     let (esp_guid, partition_num) = get_partition_info(&esp.mount_point)?;
+    info!("ESP partition: GUID={}, number={}", esp_guid, partition_num);
     
     // Build the EFI device path to the shim
     let efi_relative = efi_path
@@ -320,6 +321,11 @@ fn create_uefi_boot_entry_direct(esp: &EspInfo, efi_path: &Path, description: &s
     }
     
     info!("Successfully created UEFI boot entry {} (now default boot option)", boot_var_name);
+    
+    // Log current boot order for debugging
+    if let Ok(final_order) = read_boot_order() {
+        info!("Final BootOrder: {:04X?}", final_order);
+    }
     
     Ok(boot_var_name)
 }
@@ -485,6 +491,8 @@ fn write_uefi_variable(name: &str, guid: &str, data: &[u8]) -> Result<()> {
     let var_name: Vec<u16> = format!("{}\0", name).encode_utf16().collect();
     let guid_name: Vec<u16> = format!("{}\0", guid).encode_utf16().collect();
     
+    info!("Writing UEFI variable {} ({} bytes)", name, data.len());
+    
     let result = unsafe {
         SetFirmwareEnvironmentVariableExW(
             PCWSTR(var_name.as_ptr()),
@@ -495,9 +503,55 @@ fn write_uefi_variable(name: &str, guid: &str, data: &[u8]) -> Result<()> {
         )
     };
     
-    result.context(format!("Failed to write UEFI variable {}", name))?;
-    debug!("Wrote UEFI variable {} ({} bytes)", name, data.len());
+    if let Err(e) = result.as_ref() {
+        error!("SetFirmwareEnvironmentVariableExW failed for {}: {:?}", name, e);
+        return Err(anyhow::anyhow!("Failed to write UEFI variable {}: {:?}", name, e));
+    }
+    
+    // Verify write by reading back
+    match read_uefi_variable(name, guid) {
+        Ok(read_data) => {
+            if read_data.len() != data.len() {
+                warn!("UEFI variable {} size mismatch: wrote {} bytes, read {} bytes", 
+                      name, data.len(), read_data.len());
+            } else {
+                info!("Verified UEFI variable {} ({} bytes)", name, read_data.len());
+            }
+        }
+        Err(e) => {
+            warn!("Could not verify UEFI variable {} after write: {}", name, e);
+        }
+    }
+    
     Ok(())
+}
+
+/// Read a UEFI variable
+#[cfg(windows)]
+fn read_uefi_variable(name: &str, guid: &str) -> Result<Vec<u8>> {
+    use windows::Win32::System::WindowsProgramming::GetFirmwareEnvironmentVariableW;
+    use windows::core::PCWSTR;
+    
+    let var_name: Vec<u16> = format!("{}\0", name).encode_utf16().collect();
+    let guid_name: Vec<u16> = format!("{}\0", guid).encode_utf16().collect();
+    
+    let mut buffer = vec![0u8; 4096];
+    
+    let size = unsafe {
+        GetFirmwareEnvironmentVariableW(
+            PCWSTR(var_name.as_ptr()),
+            PCWSTR(guid_name.as_ptr()),
+            Some(buffer.as_mut_ptr() as *mut _),
+            buffer.len() as u32,
+        )
+    };
+    
+    if size == 0 {
+        bail!("Failed to read UEFI variable {}", name);
+    }
+    
+    buffer.truncate(size as usize);
+    Ok(buffer)
 }
 
 /// Delete a UEFI variable (used for rollback)
