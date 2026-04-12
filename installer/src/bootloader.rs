@@ -207,12 +207,21 @@ pub fn setup_bootloader(
     
     // Create UEFI boot entry
     info!("Creating UEFI boot entry...");
-    // Use direct UEFI NVRAM writes for both x86_64 and ARM64
-    // bcdedit creates Windows Boot Manager entries, not UEFI firmware entries
-    // which causes 0xc000007b errors when loading EFI shim
-    let boot_entry_id = create_uefi_boot_entry_direct(esp, &nixos_folder.join(shim_name), display_name)?;
     
-    // Verify the boot entry was actually created by reading BootOrder from NVRAM
+    // Try bcdedit first (more reliable on most systems)
+    // Then fall back to direct NVRAM writes if bcdedit fails
+    let boot_entry_id = match create_boot_entry_bcdedit(esp, &nixos_folder.join(shim_name), display_name) {
+        Ok(id) => {
+            info!("Created boot entry via bcdedit: {}", id);
+            id
+        }
+        Err(e) => {
+            warn!("bcdedit failed ({}), trying direct NVRAM write...", e);
+            create_uefi_boot_entry_direct(esp, &nixos_folder.join(shim_name), display_name)?
+        }
+    };
+    
+    // Verify the boot entry was actually created
     let verified = verify_uefi_boot_entry(&boot_entry_id).unwrap_or_else(|e| {
         warn!("Could not verify boot entry: {}", e);
         // Assume success if we can't verify - the create call succeeded
@@ -235,23 +244,36 @@ pub fn setup_bootloader(
     })
 }
 
-/// Verify that a boot entry exists in bcdedit
-/// Verify that a UEFI boot entry exists by checking BootOrder
+/// Verify that a UEFI boot entry exists
 /// 
-/// We read back the BootOrder variable and verify our entry number is present.
+/// For Boot#### entries (from direct NVRAM), we check BootOrder.
+/// For {guid} entries (from bcdedit), we check bcdedit /enum firmware.
 #[cfg(target_os = "windows")]
 fn verify_uefi_boot_entry(entry_id: &str) -> Result<bool> {
-    // Entry ID is like "Boot0001" - extract the number
-    if !entry_id.starts_with("Boot") {
-        return Ok(false);
+    // bcdedit GUID format: {xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}
+    if entry_id.starts_with('{') && entry_id.ends_with('}') {
+        // Verify via bcdedit /enum firmware
+        use std::process::Command;
+        let output = Command::new("bcdedit")
+            .args(["/enum", "firmware"])
+            .output()
+            .context("Failed to run bcdedit /enum firmware")?;
+        
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Ok(stdout.contains(entry_id))
+    } else if entry_id.starts_with("Boot") {
+        // NVRAM Boot#### format - check BootOrder
+        let num_str = &entry_id[4..];
+        let entry_num: u16 = u16::from_str_radix(num_str, 16)
+            .context("Invalid boot entry ID format")?;
+        
+        let boot_order = read_boot_order()?;
+        Ok(boot_order.contains(&entry_num))
+    } else {
+        // Unknown format
+        warn!("Unknown boot entry ID format: {}", entry_id);
+        Ok(false)
     }
-    let num_str = &entry_id[4..];
-    let entry_num: u16 = u16::from_str_radix(num_str, 16)
-        .context("Invalid boot entry ID format")?;
-    
-    // Read BootOrder and check if our entry is present
-    let boot_order = read_boot_order()?;
-    Ok(boot_order.contains(&entry_num))
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -833,6 +855,103 @@ fn parse_bcdedit_guid(output: &str) -> Result<String> {
     re.find(output)
         .map(|m| m.as_str().to_string())
         .context("Could not parse boot entry GUID from bcdedit output")
+}
+
+/// Create UEFI boot entry using bcdedit by copying {bootmgr}
+/// 
+/// This creates a firmware-level boot entry (not a Windows loader entry) by:
+/// 1. Copying the {bootmgr} entry to create a new firmware application entry
+/// 2. Setting the path to our shim EFI file
+/// 3. Adding the entry to the firmware boot order
+/// 
+/// This is the method used by wubiuefi and is more reliable than direct NVRAM writes.
+#[cfg(windows)]
+fn create_boot_entry_bcdedit(esp: &EspInfo, efi_path: &Path, description: &str) -> Result<String> {
+    use std::process::Command;
+    
+    info!("Creating UEFI boot entry via bcdedit...");
+    
+    // Step 1: Copy {bootmgr} to create a new firmware entry
+    let copy_output = Command::new("bcdedit")
+        .args(["/copy", "{bootmgr}", "/d", description])
+        .output()
+        .context("Failed to run bcdedit /copy")?;
+    
+    if !copy_output.status.success() {
+        let stderr = String::from_utf8_lossy(&copy_output.stderr);
+        bail!("bcdedit /copy failed: {}", stderr);
+    }
+    
+    let stdout = String::from_utf8_lossy(&copy_output.stdout);
+    let guid = parse_bcdedit_guid(&stdout)?;
+    info!("Created new boot entry: {}", guid);
+    
+    // Step 2: Set the path to our shim
+    let efi_relative = efi_path
+        .strip_prefix(&esp.mount_point)
+        .unwrap_or(efi_path);
+    let efi_path_str = format!("\\{}", efi_relative.to_string_lossy().replace('/', "\\"));
+    
+    let path_output = Command::new("bcdedit")
+        .args(["/set", &guid, "path", &efi_path_str])
+        .output()
+        .context("Failed to run bcdedit /set path")?;
+    
+    if !path_output.status.success() {
+        // Cleanup: delete the entry we just created
+        let _ = Command::new("bcdedit").args(["/delete", &guid]).output();
+        let stderr = String::from_utf8_lossy(&path_output.stderr);
+        bail!("bcdedit /set path failed: {}", stderr);
+    }
+    info!("Set boot path: {}", efi_path_str);
+    
+    // Step 3: Set the device to the ESP partition
+    let esp_letter = esp.mount_point.to_string_lossy();
+    let device_str = format!("partition={}", esp_letter.trim_end_matches('\\'));
+    
+    let device_output = Command::new("bcdedit")
+        .args(["/set", &guid, "device", &device_str])
+        .output()
+        .context("Failed to run bcdedit /set device")?;
+    
+    if !device_output.status.success() {
+        // Cleanup: delete the entry we just created
+        let _ = Command::new("bcdedit").args(["/delete", &guid]).output();
+        let stderr = String::from_utf8_lossy(&device_output.stderr);
+        bail!("bcdedit /set device failed: {}", stderr);
+    }
+    info!("Set boot device: {}", device_str);
+    
+    // Step 4: Add to firmware boot order (at the beginning so NixOS boots by default)
+    let order_output = Command::new("bcdedit")
+        .args(["/set", "{fwbootmgr}", "displayorder", &guid, "/addfirst"])
+        .output()
+        .context("Failed to run bcdedit /set displayorder")?;
+    
+    if !order_output.status.success() {
+        // Entry was created but not added to boot order - still usable but warn
+        let stderr = String::from_utf8_lossy(&order_output.stderr);
+        warn!("Could not add to boot order (entry still created): {}", stderr);
+    } else {
+        info!("Added {} to firmware boot order (first)", guid);
+    }
+    
+    // Step 5: Clean up unnecessary inherited values from bootmgr
+    let _ = Command::new("bcdedit").args(["/deletevalue", &guid, "locale"]).output();
+    let _ = Command::new("bcdedit").args(["/deletevalue", &guid, "inherit"]).output();
+    let _ = Command::new("bcdedit").args(["/deletevalue", &guid, "default"]).output();
+    let _ = Command::new("bcdedit").args(["/deletevalue", &guid, "resumeobject"]).output();
+    let _ = Command::new("bcdedit").args(["/deletevalue", &guid, "displayorder"]).output();
+    let _ = Command::new("bcdedit").args(["/deletevalue", &guid, "toolsdisplayorder"]).output();
+    let _ = Command::new("bcdedit").args(["/deletevalue", &guid, "timeout"]).output();
+    
+    info!("Successfully created firmware boot entry {}", guid);
+    Ok(guid)
+}
+
+#[cfg(not(windows))]
+fn create_boot_entry_bcdedit(_esp: &EspInfo, _efi_path: &Path, _description: &str) -> Result<String> {
+    bail!("bcdedit boot entry creation is only supported on Windows")
 }
 
 /// Remove our boot entry and files (for cleanup/uninstall)
