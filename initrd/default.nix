@@ -1,4 +1,4 @@
-{ pkgs ? import <nixpkgs> {} }:
+{ pkgs ? import <nixpkgs> {}, lib ? pkgs.lib }:
 
 # This builds a minimal NixOS system that acts as an installer
 # It boots, reads install-config.json from ESP, and performs unattended installation
@@ -1371,10 +1371,11 @@ SYSTEMD_UNIT
 
 in
 # Build a minimal NixOS system for the installer
+# Uses netboot module for proper squashfs/overlay setup
 let
   nixosSystem = pkgs.nixos {
     imports = [
-      "${pkgs.path}/nixos/modules/profiles/minimal.nix"
+      "${pkgs.path}/nixos/modules/installer/netboot/netboot-minimal.nix"
       "${pkgs.path}/nixos/modules/profiles/all-hardware.nix"
     ];
     
@@ -1385,13 +1386,6 @@ let
       # Boot - minimal config for initrd-based installer
       boot.loader.grub.enable = false;
       boot.loader.systemd-boot.enable = false;
-      
-      # Dummy root filesystem (required by NixOS, but we're running from initrd)
-      fileSystems."/" = {
-        device = "none";
-        fsType = "tmpfs";
-        options = [ "mode=0755" ];
-      };
       
       # Run installer on boot
       systemd.services.nixos-easy-installer = {
@@ -1422,8 +1416,8 @@ let
         vim
       ];
       
-      # Enable networking
-      networking.networkmanager.enable = true;
+      # Enable networking (override netboot-minimal's default)
+      networking.networkmanager.enable = lib.mkForce true;
       
       # Console setup
       console = {
@@ -1441,7 +1435,8 @@ in {
   
   # Individual components
   kernel = nixosSystem.config.system.build.kernel;
-  initrd = nixosSystem.config.system.build.initialRamdisk;
+  # Use netboot ramdisk which includes squashfs store
+  initrd = nixosSystem.config.system.build.netbootRamdisk;
   
   # Combined boot assets
   bootAssets = pkgs.runCommand "installer-boot-assets" {
@@ -1450,7 +1445,8 @@ in {
     mkdir -p $out
     cp ${nixosSystem.config.system.build.kernel}/*Image $out/bzImage 2>/dev/null || \
       cp ${nixosSystem.config.system.build.kernel}/bzImage $out/bzImage
-    cp ${nixosSystem.config.system.build.initialRamdisk}/initrd $out/initrd
+    # Use netbootRamdisk which includes squashfs
+    cp ${nixosSystem.config.system.build.netbootRamdisk}/initrd $out/initrd
     
     # Export the init path - required for booting NixOS
     # This is the path to stage-2 init in the toplevel closure
