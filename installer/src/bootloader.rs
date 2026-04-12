@@ -526,7 +526,7 @@ fn write_uefi_variable(name: &str, guid: &str, data: &[u8]) -> Result<()> {
     };
     
     if let Err(e) = result.as_ref() {
-        error!("SetFirmwareEnvironmentVariableExW failed for {}: {:?}", name, e);
+        warn!("SetFirmwareEnvironmentVariableExW failed for {}: {:?}", name, e);
         return Err(anyhow::anyhow!("Failed to write UEFI variable {}: {:?}", name, e));
     }
     
