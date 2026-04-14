@@ -18,7 +18,8 @@ use tracing::{info, debug, warn};
 // ESP Space Requirements
 // ============================================================================
 // These are approximate sizes of assets we place on ESP.
-// Based on actual build outputs. Update if initrd/kernel sizes change significantly.
+// For loopback installs, only bootloader files go on ESP (kernel/initrd go to NTFS).
+// For partition installs, all boot files go on ESP.
 
 /// Shim + GRUB + configs: ~5MB
 pub const ESP_SIZE_BOOTLOADER: u64 = 5 * 1024 * 1024;
@@ -28,20 +29,39 @@ pub const ESP_SIZE_BOOTLOADER: u64 = 5 * 1024 * 1024;
 pub const ESP_SIZE_KERNEL_X64: u64 = 48 * 1024 * 1024;
 pub const ESP_SIZE_KERNEL_AA64: u64 = 65 * 1024 * 1024;
 
-/// Initrd: ~13MB on both architectures
+/// Initrd: standard ~13MB, X1E ~500MB (contains full squashfs)
 pub const ESP_SIZE_INITRD: u64 = 15 * 1024 * 1024;
+pub const ESP_SIZE_INITRD_X1E: u64 = 550 * 1024 * 1024;
 
 /// Safety margin for configs, GRUB modules, filesystem overhead
 pub const ESP_SIZE_MARGIN: u64 = 2 * 1024 * 1024;
 
-/// Calculate total ESP space required for current architecture
-pub fn required_esp_space() -> u64 {
+/// Calculate ESP space required for loopback installs
+/// Only bootloader files (shim, GRUB, config) go on ESP - kernel/initrd/dtb go to NTFS
+pub fn required_esp_space_loopback() -> u64 {
+    ESP_SIZE_BOOTLOADER + ESP_SIZE_MARGIN
+}
+
+/// Calculate total ESP space required for partition installs (all boot files on ESP)
+pub fn required_esp_space_partition() -> u64 {
     let kernel_size = if detect_arch() == "aarch64" {
         ESP_SIZE_KERNEL_AA64
     } else {
         ESP_SIZE_KERNEL_X64
     };
-    ESP_SIZE_BOOTLOADER + kernel_size + ESP_SIZE_INITRD + ESP_SIZE_MARGIN
+    let initrd_size = if detect_platform().needs_custom_kernel() {
+        ESP_SIZE_INITRD_X1E
+    } else {
+        ESP_SIZE_INITRD
+    };
+    ESP_SIZE_BOOTLOADER + kernel_size + initrd_size + ESP_SIZE_MARGIN
+}
+
+/// Calculate total ESP space required for current architecture (legacy - assumes partition install)
+pub fn required_esp_space() -> u64 {
+    // For preflight checks, use loopback requirements since that's what we currently support
+    // This is conservative - loopback only needs ~7MB on ESP
+    required_esp_space_loopback()
 }
 
 /// Get human-readable ESP space requirement in MB

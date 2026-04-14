@@ -672,6 +672,32 @@ fn verify_setup(state: &InstallState) -> Result<()> {
             info!("Device Tree Blob verified ({} bytes)", dtb_size);
         }
         
+        // Verify kernel and initrd exist in boot_files_folder
+        // These are always stored there (NTFS for loopback, ESP otherwise)
+        let kernel = bootloader.boot_files_folder.join("bzImage");
+        let initrd = bootloader.boot_files_folder.join("initrd");
+        
+        if !kernel.exists() {
+            bail!("Kernel (bzImage) not found at {:?}", bootloader.boot_files_folder);
+        }
+        if !initrd.exists() {
+            bail!("Initrd not found at {:?}", bootloader.boot_files_folder);
+        }
+        
+        let kernel_size = std::fs::metadata(&kernel)?.len();
+        let initrd_size = std::fs::metadata(&initrd)?.len();
+        
+        // Sanity check sizes - kernel should be at least 1MB, initrd at least 10MB
+        if kernel_size < 1_000_000 {
+            bail!("Kernel appears invalid (only {} bytes). Expected > 1MB.", kernel_size);
+        }
+        if initrd_size < 10_000_000 {
+            bail!("Initrd appears invalid (only {} bytes). Expected > 10MB.", initrd_size);
+        }
+        
+        info!("Kernel verified ({} bytes)", kernel_size);
+        info!("Initrd verified ({} bytes)", initrd_size);
+        
         info!("ESP folder verified: {:?}", bootloader.esp_folder);
     }
     

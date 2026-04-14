@@ -458,7 +458,8 @@ pub fn validate_requirements(info: &SystemInfo) -> ValidationResult {
     }
     
     // Check ESP exists and has enough space for boot assets
-    // Required space is calculated dynamically based on actual asset sizes
+    // For loopback installs, only bootloader files go on ESP (~7MB)
+    // Kernel/initrd/dtb go on NTFS partition
     if info.is_uefi {
         match &info.esp {
             Some(esp) => {
@@ -467,7 +468,7 @@ pub fn validate_requirements(info: &SystemInfo) -> ValidationResult {
                 if esp.free_space < required {
                     let free_mb = esp.free_space / (1024 * 1024);
                     errors.push(format!(
-                        "Insufficient ESP space: {}MB free ({}MB required for kernel, initrd, bootloader)",
+                        "Insufficient ESP space: {}MB free ({}MB required for bootloader)",
                         free_mb, required_mb
                     ));
                 }
