@@ -881,7 +881,8 @@ pub fn generate_grub_config(nixos_root: &str, install_type: &str, init_path: Opt
     
     // For loopback install, we pass the disk location as kernel parameter
     // Quote the path in case it contains spaces
-    if install_type == "loopback" || install_type == "quick" {
+    let is_loopback = install_type == "loopback" || install_type == "quick";
+    if is_loopback {
         let loopback_path = format!("{}/root.disk", nixos_root.replace("\\", "/"));
         // GRUB kernel params with spaces need quoting
         if loopback_path.contains(' ') {
@@ -907,11 +908,52 @@ pub fn generate_grub_config(nixos_root: &str, install_type: &str, init_path: Opt
     // Ubuntu's signed GRUB works with linux/initrd on both architectures
     let (linux_cmd, initrd_cmd) = ("linux", "initrd");
     
+    // For loopback installs, kernel/initrd/dtb are stored on the NTFS partition
+    // alongside root.disk to avoid ESP space limitations (initrd can be 500MB+)
+    // We use GRUB's search command to find the partition by looking for root.disk
+    let boot_path = if is_loopback {
+        // Convert Windows path (C:\NixOS) to GRUB path (/NixOS/boot)
+        let grub_root = nixos_root.replace("\\", "/");
+        // Strip drive letter if present (C:/NixOS -> /NixOS)
+        let grub_root = if grub_root.chars().nth(1) == Some(':') {
+            &grub_root[2..]
+        } else {
+            &grub_root
+        };
+        format!("{}/boot", grub_root)
+    } else {
+        "/EFI/NixOS".to_string()
+    };
+    
+    // Prefix for boot files - use $ntfsroot variable for loopback
+    let file_prefix = if is_loopback {
+        "($ntfsroot)".to_string()
+    } else {
+        String::new()
+    };
+    
     // Device Tree Blob command for ARM64 X1E - must come BEFORE linux command
     let dtb_cmd = if has_dtb {
-        "    devicetree /EFI/NixOS/device.dtb\n"
+        format!("    devicetree {}{}/device.dtb\n", file_prefix, boot_path)
     } else {
-        ""
+        String::new()
+    };
+    
+    // For loopback, we need to search for and set the NTFS partition
+    let search_cmd = if is_loopback {
+        let search_file = format!("{}/root.disk", nixos_root.replace("\\", "/"));
+        let search_file = if search_file.chars().nth(1) == Some(':') {
+            &search_file[2..]
+        } else {
+            &search_file
+        };
+        format!(r#"
+# Search for the partition containing NixOS boot files
+# This finds the NTFS partition with root.disk
+search --no-floppy --file {} --set=ntfsroot
+"#, search_file)
+    } else {
+        String::new()
     };
 
     format!(r#"# NixOS Easy Install - GRUB Configuration
@@ -923,24 +965,23 @@ set default=0
 # Load required modules
 insmod part_gpt
 insmod fat
+insmod ntfs
 insmod ext2
 insmod loopback
 insmod normal
 insmod linux
 insmod all_video
-
-# ESP contains the kernel and initrd
-# Config file at $prefix/../install-config.json tells installer what to do
-
+insmod search
+{search_cmd}
 menuentry "NixOS Installer" --class nixos --class gnu-linux --class os {{
-{dtb_cmd}    # Load kernel and initrd from ESP (same partition as GRUB)
-    {linux_cmd} /EFI/NixOS/bzImage {kernel_params} quiet
-    {initrd_cmd} /EFI/NixOS/initrd
+{dtb_cmd}    # Load kernel and initrd
+    {linux_cmd} {file_prefix}{boot_path}/bzImage {kernel_params} quiet
+    {initrd_cmd} {file_prefix}{boot_path}/initrd
 }}
 
 menuentry "NixOS Installer (verbose)" --class nixos --class gnu-linux --class os {{
-{dtb_cmd}    {linux_cmd} /EFI/NixOS/bzImage {kernel_params}
-    {initrd_cmd} /EFI/NixOS/initrd
+{dtb_cmd}    {linux_cmd} {file_prefix}{boot_path}/bzImage {kernel_params}
+    {initrd_cmd} {file_prefix}{boot_path}/initrd
 }}
 
 menuentry "Windows Boot Manager" --class windows {{
@@ -956,6 +997,9 @@ menuentry "UEFI Firmware Settings" {{
         initrd_cmd = initrd_cmd,
         kernel_params = kernel_params,
         dtb_cmd = dtb_cmd,
+        search_cmd = search_cmd,
+        file_prefix = file_prefix,
+        boot_path = boot_path,
     )
 }
 
@@ -1009,7 +1053,9 @@ mod tests {
         assert!(config.contains("NixOS Installer"));
         assert!(config.contains("nixos.loopback=/NixOS/root.disk"));
         assert!(config.contains("init=/nix/store/test-init"));
-        assert!(config.contains("/EFI/NixOS/bzImage"));
+        // Loopback uses NTFS partition, not ESP
+        assert!(config.contains("/NixOS/boot/bzImage"));
+        assert!(config.contains("search --no-floppy --file /NixOS/root.disk"));
         assert!(config.contains("Windows Boot Manager"));
     }
     
@@ -1018,6 +1064,8 @@ mod tests {
         let config = generate_grub_config("/", "partition", None, false);
         // Partition install doesn't have loopback parameter
         assert!(!config.contains("nixos.loopback"));
+        // Partition install uses ESP
+        assert!(config.contains("/EFI/NixOS/bzImage"));
     }
     
     #[test]
@@ -1029,7 +1077,8 @@ mod tests {
     #[test]
     fn test_grub_config_with_dtb() {
         let config = generate_grub_config("/NixOS", "loopback", Some("/nix/store/test-init"), true);
-        assert!(config.contains("devicetree /EFI/NixOS/device.dtb"));
+        // DTB goes to boot folder on NTFS for loopback
+        assert!(config.contains("devicetree ($ntfsroot)/NixOS/boot/device.dtb"));
         assert!(config.contains("pd_ignore_unused"));
         assert!(config.contains("clk_ignore_unused"));
     }

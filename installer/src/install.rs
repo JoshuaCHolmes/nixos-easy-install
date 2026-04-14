@@ -321,7 +321,7 @@ async fn install_inner(
     
     // Step 2: Set up bootloader (ESP already verified in preflight)
     progress(0.50, "Setting up bootloader...");
-    let bootloader_result = setup_bootloader(esp, &boot_files)?;
+    let bootloader_result = setup_bootloader(esp, &boot_files, config)?;
     state.esp_folder = Some(bootloader_result.esp_folder.clone());
     state.bootloader_result = Some(bootloader_result.clone());
     
@@ -537,13 +537,21 @@ async fn download_boot_assets(config: &InstallConfig) -> Result<BootFiles> {
     })
 }
 
-fn setup_bootloader(esp: &EspInfo, boot_files: &BootFiles) -> Result<BootloaderSetupResult> {
+fn setup_bootloader(esp: &EspInfo, boot_files: &BootFiles, config: &InstallConfig) -> Result<BootloaderSetupResult> {
     // First verify ESP is accessible
     if esp.mount_point.as_os_str().is_empty() {
         anyhow::bail!("ESP is not mounted. Please mount it and try again.");
     }
     
-    crate::bootloader::setup_bootloader(esp, boot_files, "NixOS")
+    // For loopback installs, store large boot files (kernel, initrd) on the NTFS partition
+    // This avoids ESP space limitations (ESP is typically only 100-500MB, initrd can be 500MB+)
+    let boot_files_dir = if config.install_type == "loopback" || config.install_type == "quick" {
+        config.loopback.as_ref().map(|l| PathBuf::from(&l.target_dir))
+    } else {
+        None
+    };
+    
+    crate::bootloader::setup_bootloader(esp, boot_files, "NixOS", boot_files_dir.as_deref())
 }
 
 /// Install OS switching utilities for easy boot switching

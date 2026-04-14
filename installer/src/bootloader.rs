@@ -54,6 +54,9 @@ pub struct BootloaderSetupResult {
     /// Path to our boot folder on ESP
     pub esp_folder: PathBuf,
     
+    /// Path to boot files (kernel/initrd) - may be different from ESP for loopback
+    pub boot_files_folder: PathBuf,
+    
     /// UEFI boot entry ID (for removal if needed)
     pub boot_entry_id: String,
     
@@ -136,6 +139,10 @@ pub struct BootPreflight {
 
 /// Set up bootloader on ESP
 /// 
+/// For loopback installs, large boot files (kernel, initrd, dtb) are stored
+/// in `boot_files_dir` (typically C:\NixOS\boot) instead of ESP to avoid
+/// space limitations. The ESP only needs ~10MB for GRUB and shim.
+/// 
 /// SAFETY:
 /// - Creates new folder in EFI directory only
 /// - Does not modify any existing boot entries
@@ -144,6 +151,7 @@ pub fn setup_bootloader(
     esp: &EspInfo, 
     boot_files: &BootFiles,
     display_name: &str,
+    boot_files_dir: Option<&Path>,
 ) -> Result<BootloaderSetupResult> {
     info!("Setting up {} bootloader on ESP at {:?}", boot_files.arch, esp.mount_point);
     
@@ -165,10 +173,22 @@ pub fn setup_bootloader(
     
     let nixos_folder = preflight.nixos_folder;
     
-    // Create our boot folder
+    // Create our boot folder on ESP
     info!("Creating NixOS boot folder: {:?}", nixos_folder);
     fs::create_dir_all(&nixos_folder)
         .context("Failed to create NixOS boot folder")?;
+    
+    // Determine where to store large boot files (kernel, initrd, dtb)
+    // For loopback installs, use the provided directory (on NTFS) to avoid ESP space issues
+    let large_files_folder = if let Some(dir) = boot_files_dir {
+        let boot_dir = dir.join("boot");
+        info!("Using NTFS partition for large boot files: {:?}", boot_dir);
+        fs::create_dir_all(&boot_dir)
+            .context("Failed to create boot files directory")?;
+        boot_dir
+    } else {
+        nixos_folder.clone()
+    };
     
     // Determine filenames based on architecture
     let (shim_name, grub_name) = if boot_files.arch == "aarch64" || boot_files.arch.starts_with("aarch64") {
@@ -177,30 +197,31 @@ pub fn setup_bootloader(
         ("shimx64.efi", "grubx64.efi")
     };
     
-    // Copy EFI boot files
+    // Copy EFI boot files (always go to ESP - these are small)
     copy_boot_file(&boot_files.shim, &nixos_folder.join(shim_name), "shim")?;
     copy_boot_file(&boot_files.grub, &nixos_folder.join(grub_name), "GRUB")?;
     copy_boot_file(&boot_files.mok_cert, &nixos_folder.join("MOK.cer"), "MOK certificate")?;
     copy_boot_file(&boot_files.grub_cfg, &nixos_folder.join("grub.cfg"), "GRUB config")?;
     
-    // Copy NixOS installer kernel and initrd (if provided)
+    // Copy NixOS installer kernel and initrd to the large files folder
+    // These can be 500MB+ and won't fit on most ESPs
     if let Some(kernel) = &boot_files.kernel {
-        copy_boot_file(kernel, &nixos_folder.join("bzImage"), "NixOS kernel")?;
+        copy_boot_file(kernel, &large_files_folder.join("bzImage"), "NixOS kernel")?;
     }
     if let Some(initrd) = &boot_files.initrd {
-        copy_boot_file(initrd, &nixos_folder.join("initrd"), "NixOS initrd")?;
+        copy_boot_file(initrd, &large_files_folder.join("initrd"), "NixOS initrd")?;
     }
     // Copy Device Tree Blob for ARM64 X1E (if provided)
     if let Some(dtb) = &boot_files.device_dtb {
-        let dtb_dest = nixos_folder.join("device.dtb");
+        let dtb_dest = large_files_folder.join("device.dtb");
         copy_boot_file(dtb, &dtb_dest, "Device Tree Blob")?;
         // Verify DTB was actually copied (critical for X1E boot)
         if !dtb_dest.exists() {
-            bail!("Failed to copy Device Tree Blob to ESP - file not found after copy");
+            bail!("Failed to copy Device Tree Blob - file not found after copy");
         }
         let dtb_size = std::fs::metadata(&dtb_dest)?.len();
         if dtb_size == 0 {
-            bail!("Device Tree Blob copied to ESP is empty (0 bytes)");
+            bail!("Device Tree Blob copied is empty (0 bytes)");
         }
         info!("Device Tree Blob copied successfully ({} bytes)", dtb_size);
     }
@@ -239,6 +260,7 @@ pub fn setup_bootloader(
     
     Ok(BootloaderSetupResult {
         esp_folder: nixos_folder,
+        boot_files_folder: large_files_folder,
         boot_entry_id,
         secure_boot_ready: true,
     })
