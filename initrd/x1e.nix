@@ -590,8 +590,9 @@ let
       # CRITICAL: Disable default initrd modules - the X1E kernel doesn't have
       # standard ARM modules like dw-hdmi that are in the default module list.
       # We specify only the modules we actually need.
-      boot.initrd.includeDefaultModules = false;
-      boot.initrd.availableKernelModules = [
+      # Use mkForce to override any defaults from netboot-minimal.nix
+      boot.initrd.includeDefaultModules = lib.mkForce false;
+      boot.initrd.availableKernelModules = lib.mkForce [
         # Storage and filesystem
         "loop"
         "squashfs"
