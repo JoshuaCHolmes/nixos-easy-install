@@ -229,16 +229,34 @@ pub fn setup_bootloader(
     // Create UEFI boot entry
     info!("Creating UEFI boot entry...");
     
-    // Try bcdedit first (more reliable on most systems)
-    // Then fall back to direct NVRAM writes if bcdedit fails
-    let boot_entry_id = match create_boot_entry_bcdedit(esp, &nixos_folder.join(shim_name), display_name) {
-        Ok(id) => {
-            info!("Created boot entry via bcdedit: {}", id);
-            id
+    // On ARM64, bcdedit often fails to create proper firmware boot entries
+    // (it creates Windows Boot Manager entries instead of UEFI firmware entries)
+    // So on ARM64, prefer direct NVRAM writes which create true UEFI boot entries
+    let arch = crate::assets::detect_arch();
+    
+    let boot_entry_id = if arch == "aarch64" {
+        // ARM64: Try direct NVRAM first, fall back to bcdedit
+        match create_uefi_boot_entry_direct(esp, &nixos_folder.join(shim_name), display_name) {
+            Ok(id) => {
+                info!("Created boot entry via direct NVRAM: {}", id);
+                id
+            }
+            Err(e) => {
+                warn!("Direct NVRAM write failed ({}), trying bcdedit...", e);
+                create_boot_entry_bcdedit(esp, &nixos_folder.join(shim_name), display_name)?
+            }
         }
-        Err(e) => {
-            warn!("bcdedit failed ({}), trying direct NVRAM write...", e);
-            create_uefi_boot_entry_direct(esp, &nixos_folder.join(shim_name), display_name)?
+    } else {
+        // x86_64: Try bcdedit first (more reliable), fall back to direct NVRAM
+        match create_boot_entry_bcdedit(esp, &nixos_folder.join(shim_name), display_name) {
+            Ok(id) => {
+                info!("Created boot entry via bcdedit: {}", id);
+                id
+            }
+            Err(e) => {
+                warn!("bcdedit failed ({}), trying direct NVRAM write...", e);
+                create_uefi_boot_entry_direct(esp, &nixos_folder.join(shim_name), display_name)?
+            }
         }
     };
     
