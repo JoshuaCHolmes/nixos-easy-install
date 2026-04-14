@@ -651,11 +651,13 @@ fn verify_setup(state: &InstallState) -> Result<()> {
         
         // Verify DTB exists for platforms that require it (X1E)
         if platform.needs_custom_kernel() {
-            let dtb = bootloader.esp_folder.join("device.dtb");
+            // DTB is stored in boot_files_folder (NTFS for loopback installs, ESP otherwise)
+            let dtb = bootloader.boot_files_folder.join("device.dtb");
             if !dtb.exists() {
                 bail!(
-                    "Device Tree Blob (device.dtb) not found in ESP.\n\
+                    "Device Tree Blob (device.dtb) not found at {:?}.\n\
                     This is required for {} to boot. Installation cannot continue.",
+                    bootloader.boot_files_folder,
                     platform.display_name()
                 );
             }
