@@ -1425,8 +1425,8 @@ let
         keyMap = "us";
       };
       
-      # Minimal services
-      services.getty.autologinUser = "root";
+      # Minimal services - use mkForce to override installation-device.nix's "nixos" default
+      services.getty.autologinUser = lib.mkForce "root";
     };
   };
 in {

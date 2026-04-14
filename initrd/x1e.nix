@@ -594,7 +594,14 @@ let
       boot.kernelParams = [
         "pd_ignore_unused"
         "clk_ignore_unused"
+        # Yoga Slim 7x needs explicit console=tty1 to show output on screen
+        # (UART is also enabled in device tree, systemd may pick wrong console)
+        "console=tty1"
       ];
+      
+      # CRITICAL: Blacklist qcom_q6v5_pas during install - it interferes with USB boot
+      # This is from x1e-nixos-config's iso.nix - the ADSP driver messes with USB
+      boot.blacklistedKernelModules = [ "qcom_q6v5_pas" ];
       
       # Run installer on boot
       systemd.services.nixos-easy-installer = {
@@ -640,8 +647,8 @@ let
         keyMap = "us";
       };
       
-      # Minimal services
-      services.getty.autologinUser = "root";
+      # Minimal services - use mkForce to override installation-device.nix's "nixos" default
+      services.getty.autologinUser = lib.mkForce "root";
     };
   };
 in {

@@ -857,33 +857,97 @@ fn parse_bcdedit_guid(output: &str) -> Result<String> {
         .context("Could not parse boot entry GUID from bcdedit output")
 }
 
-/// Create UEFI boot entry using bcdedit by copying {bootmgr}
-/// 
-/// This creates a firmware-level boot entry (not a Windows loader entry) by:
-/// 1. Copying the {bootmgr} entry to create a new firmware application entry
-/// 2. Setting the path to our shim EFI file
-/// 3. Adding the entry to the firmware boot order
-/// 
-/// This is the method used by wubiuefi and is more reliable than direct NVRAM writes.
+/// Try to create a firmware application entry using bcdedit /create
 #[cfg(windows)]
-fn create_boot_entry_bcdedit(esp: &EspInfo, efi_path: &Path, description: &str) -> Result<String> {
+fn try_create_firmware_entry(description: &str) -> Result<String> {
     use std::process::Command;
     
-    info!("Creating UEFI boot entry via bcdedit...");
+    // Use /application osloader which creates an EFI application entry
+    // that can load any EFI binary (including shim)
+    let output = Command::new("bcdedit")
+        .args(["/create", "/d", description, "/application", "osloader"])
+        .output()
+        .context("Failed to run bcdedit /create")?;
     
-    // Step 1: Copy {bootmgr} to create a new firmware entry
-    let copy_output = Command::new("bcdedit")
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("bcdedit /create failed: {}", stderr);
+    }
+    
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_bcdedit_guid(&stdout)
+}
+
+/// Try to copy {fwbootmgr} to create a firmware-level entry
+#[cfg(windows)]
+fn try_copy_fwbootmgr(description: &str) -> Result<String> {
+    use std::process::Command;
+    
+    let output = Command::new("bcdedit")
+        .args(["/copy", "{fwbootmgr}", "/d", description])
+        .output()
+        .context("Failed to run bcdedit /copy {fwbootmgr}")?;
+    
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("bcdedit /copy {{fwbootmgr}} failed: {}", stderr);
+    }
+    
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_bcdedit_guid(&stdout)
+}
+
+/// Try to copy {bootmgr} as a last resort
+#[cfg(windows)]
+fn try_copy_bootmgr(description: &str) -> Result<String> {
+    use std::process::Command;
+    
+    let output = Command::new("bcdedit")
         .args(["/copy", "{bootmgr}", "/d", description])
         .output()
         .context("Failed to run bcdedit /copy")?;
     
-    if !copy_output.status.success() {
-        let stderr = String::from_utf8_lossy(&copy_output.stderr);
-        bail!("bcdedit /copy failed: {}", stderr);
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("bcdedit /copy {{bootmgr}} failed: {}", stderr);
     }
     
-    let stdout = String::from_utf8_lossy(&copy_output.stdout);
-    let guid = parse_bcdedit_guid(&stdout)?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_bcdedit_guid(&stdout)
+}
+
+/// Create UEFI boot entry using bcdedit
+/// 
+/// This creates a firmware-level boot entry by:
+/// 1. Creating a new firmware application entry in the BCD firmware store
+/// 2. Setting the path to our shim EFI file
+/// 3. Adding the entry to the firmware boot order ({fwbootmgr})
+/// 
+/// IMPORTANT: We must create a FIRMWARE APPLICATION entry, not a Windows loader entry.
+/// Copying {bootmgr} creates a Windows Boot Manager entry that tries to parse BCD data,
+/// which fails for non-Windows EFI applications like shim/GRUB.
+#[cfg(windows)]
+fn create_boot_entry_bcdedit(esp: &EspInfo, efi_path: &Path, description: &str) -> Result<String> {
+    use std::process::Command;
+    
+    info!("Creating UEFI firmware boot entry via bcdedit...");
+    
+    // Step 1: Create a new firmware application entry
+    // Try multiple methods in order of preference:
+    // 1. /create /application osloader - creates a proper EFI application entry
+    // 2. /copy {fwbootmgr} - copies firmware boot manager (not Windows boot manager)
+    // 3. /copy {bootmgr} as last resort (may have issues with shim)
+    
+    let guid = try_create_firmware_entry(description)
+        .or_else(|e| {
+            warn!("Primary create failed: {}, trying {fwbootmgr} copy...", e);
+            try_copy_fwbootmgr(description)
+        })
+        .or_else(|e| {
+            warn!("{fwbootmgr} copy failed: {}, trying {bootmgr} copy as last resort...", e);
+            try_copy_bootmgr(description)
+        })?;
+    
     info!("Created new boot entry: {}", guid);
     
     // Step 2: Set the path to our shim
