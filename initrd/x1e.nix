@@ -587,6 +587,31 @@ let
       boot.loader.grub.enable = false;
       boot.loader.systemd-boot.enable = false;
       
+      # CRITICAL: Disable default initrd modules - the X1E kernel doesn't have
+      # standard ARM modules like dw-hdmi that are in the default module list.
+      # We specify only the modules we actually need.
+      boot.initrd.includeDefaultModules = false;
+      boot.initrd.availableKernelModules = [
+        # Storage and filesystem
+        "loop"
+        "squashfs"
+        "overlay"
+        "ntfs3"
+        "vfat"
+        "nls_cp437"
+        "nls_iso8859_1"
+        # Block devices
+        "uas"
+        "usb_storage"
+        "sd_mod"
+        "nvme"
+        # USB controllers (Qualcomm)
+        "xhci_pci"
+        "xhci_hcd"
+        # Network (for installer networking)
+        "af_packet"
+      ];
+      
       # X1E-specific kernel parameters - prevent clock/power domain shutdown
       # before drivers load (display, USB, etc. won't initialize without these)
       # These are also passed via GRUB, but having them here ensures they're
