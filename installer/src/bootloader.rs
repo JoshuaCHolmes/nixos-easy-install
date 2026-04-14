@@ -940,11 +940,11 @@ fn create_boot_entry_bcdedit(esp: &EspInfo, efi_path: &Path, description: &str) 
     
     let guid = try_create_firmware_entry(description)
         .or_else(|e| {
-            warn!("Primary create failed: {}, trying {fwbootmgr} copy...", e);
+            warn!("Primary create failed: {}, trying {{fwbootmgr}} copy...", e);
             try_copy_fwbootmgr(description)
         })
         .or_else(|e| {
-            warn!("{fwbootmgr} copy failed: {}, trying {bootmgr} copy as last resort...", e);
+            warn!("{{fwbootmgr}} copy failed: {}, trying {{bootmgr}} copy as last resort...", e);
             try_copy_bootmgr(description)
         })?;
     
