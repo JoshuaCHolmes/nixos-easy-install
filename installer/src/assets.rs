@@ -976,22 +976,18 @@ search --no-floppy --file {} --set=ntfsroot
         String::new()
     };
 
+    // Note: Ubuntu's signed GRUB has core modules embedded (part_gpt, fat, linux, etc.)
+    // We avoid using 'insmod' for modules that might not be embedded or available
+    // because the signed GRUB looks for modules in /EFI/ubuntu/arm64-efi/ which doesn't exist
+    // 
+    // Embedded in Ubuntu signed GRUB: part_gpt, fat, ext2, ntfs, linux, normal, search, chain, etc.
+    // We only use insmod for search to ensure it's loaded for our NTFS root search
+
     format!(r#"# NixOS Easy Install - GRUB Configuration
 # Auto-generated - do not edit manually
 
 set timeout=5
 set default=0
-
-# Load required modules
-insmod part_gpt
-insmod fat
-insmod ntfs
-insmod ext2
-insmod loopback
-insmod normal
-insmod linux
-insmod all_video
-insmod search
 {search_cmd}
 menuentry "NixOS Installer" --class nixos --class gnu-linux --class os {{
 {dtb_cmd}    # Load kernel and initrd
@@ -1005,7 +1001,6 @@ menuentry "NixOS Installer (verbose)" --class nixos --class gnu-linux --class os
 }}
 
 menuentry "Windows Boot Manager" --class windows {{
-    insmod chain
     chainloader /EFI/Microsoft/Boot/bootmgfw.efi
 }}
 
