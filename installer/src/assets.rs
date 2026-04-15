@@ -960,6 +960,7 @@ pub fn generate_grub_config(nixos_root: &str, install_type: &str, init_path: Opt
     };
     
     // For loopback, we need to search for and set the NTFS partition
+    // Use search with --hint to speed it up - hint points to likely partition
     let search_cmd = if is_loopback {
         let search_file = format!("{}/root.disk", nixos_root.replace("\\", "/"));
         let search_file = if search_file.chars().nth(1) == Some(':') {
@@ -967,10 +968,11 @@ pub fn generate_grub_config(nixos_root: &str, install_type: &str, init_path: Opt
         } else {
             &search_file
         };
+        // Use hd0,gpt3 as hint (common for Windows C: partition on GPT disk)
+        // The search will still work even if hint is wrong, just faster if right
         format!(r#"
 # Search for the partition containing NixOS boot files
-# This finds the NTFS partition with root.disk
-search --no-floppy --file {} --set=ntfsroot
+search --no-floppy --set=ntfsroot --hint-bios=hd0,gpt3 --hint-efi=hd0,gpt3 --file {}
 "#, search_file)
     } else {
         String::new()
@@ -985,6 +987,12 @@ search --no-floppy --file {} --set=ntfsroot
 
     format!(r#"# NixOS Easy Install - GRUB Configuration
 # Auto-generated - do not edit manually
+
+# Force console output (needed for some ARM64 systems)
+terminal_input console
+terminal_output console
+set gfxmode=auto
+set gfxpayload=text
 
 set timeout=5
 set default=0
@@ -1070,7 +1078,8 @@ mod tests {
         assert!(config.contains("init=/nix/store/test-init"));
         // Loopback uses NTFS partition, not ESP
         assert!(config.contains("/NixOS/boot/bzImage"));
-        assert!(config.contains("search --no-floppy --file /NixOS/root.disk"));
+        assert!(config.contains("search --no-floppy"));
+        assert!(config.contains("--file /NixOS/root.disk"));
         assert!(config.contains("Windows Boot Manager"));
     }
     
